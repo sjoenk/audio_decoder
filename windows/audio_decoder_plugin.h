@@ -27,7 +27,10 @@ class AudioDecoderPlugin : public flutter::Plugin {
 
  private:
   std::string ConvertToWav(const std::string& inputPath,
-                           const std::string& outputPath);
+                           const std::string& outputPath,
+                           int targetSampleRate = -1,
+                           int targetChannels = -1,
+                           int targetBitDepth = -1);
   std::string ConvertToM4a(const std::string& inputPath,
                            const std::string& outputPath);
   flutter::EncodableMap GetAudioInfo(const std::string& path);
@@ -47,7 +50,10 @@ class AudioDecoderPlugin : public flutter::Plugin {
       uint32_t bitsPerSample;
   };
   PcmResult DecodeToPcm(const std::string& inputPath,
-                         int64_t startMs = -1, int64_t endMs = -1);
+                         int64_t startMs = -1, int64_t endMs = -1,
+                         int targetSampleRate = -1,
+                         int targetChannels = -1,
+                         int targetBitDepth = -1);
 
   // Temp file helpers for bytes-based API
   std::string WriteTempFile(const std::vector<uint8_t>& data,

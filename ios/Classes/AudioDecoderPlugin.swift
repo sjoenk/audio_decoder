@@ -15,9 +15,9 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "convertToWav":
-            guard let args = call.arguments as? [String: String],
-                  let inputPath = args["inputPath"],
-                  let outputPath = args["outputPath"] else {
+            guard let args = call.arguments as? [String: Any],
+                  let inputPath = args["inputPath"] as? String,
+                  let outputPath = args["outputPath"] as? String else {
                 result(FlutterError(
                     code: "INVALID_ARGUMENTS",
                     message: "inputPath and outputPath are required",
@@ -25,7 +25,10 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                 ))
                 return
             }
-            convertToWav(inputPath: inputPath, outputPath: outputPath, result: result)
+            let sampleRate = args["sampleRate"] as? Int
+            let channels = args["channels"] as? Int
+            let bitDepth = args["bitDepth"] as? Int
+            convertToWav(inputPath: inputPath, outputPath: outputPath, sampleRate: sampleRate, channels: channels, bitDepth: bitDepth, result: result)
         case "convertToM4a":
             guard let args = call.arguments as? [String: String],
                   let inputPath = args["inputPath"],
@@ -82,7 +85,10 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                 result(FlutterError(code: "INVALID_ARGUMENTS", message: "inputData and formatHint are required", details: nil))
                 return
             }
-            convertToWavBytes(inputData: inputData, formatHint: formatHint, result: result)
+            let sampleRate = args["sampleRate"] as? Int
+            let channels = args["channels"] as? Int
+            let bitDepth = args["bitDepth"] as? Int
+            convertToWavBytes(inputData: inputData, formatHint: formatHint, sampleRate: sampleRate, channels: channels, bitDepth: bitDepth, result: result)
         case "convertToM4aBytes":
             guard let args = call.arguments as? [String: Any],
                   let inputData = args["inputData"] as? FlutterStandardTypedData,
@@ -126,10 +132,10 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
 
     // MARK: - Convert to WAV
 
-    private func convertToWav(inputPath: String, outputPath: String, result: @escaping FlutterResult) {
+    private func convertToWav(inputPath: String, outputPath: String, sampleRate: Int?, channels: Int?, bitDepth: Int?, result: @escaping FlutterResult) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                try self.performConversion(inputPath: inputPath, outputPath: outputPath)
+                try self.performConversion(inputPath: inputPath, outputPath: outputPath, targetSampleRate: sampleRate, targetChannels: channels, targetBitDepth: bitDepth)
                 DispatchQueue.main.async {
                     result(outputPath)
                 }
@@ -145,7 +151,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
         }
     }
 
-    private func performConversion(inputPath: String, outputPath: String) throws {
+    private func performConversion(inputPath: String, outputPath: String, targetSampleRate: Int? = nil, targetChannels: Int? = nil, targetBitDepth: Int? = nil) throws {
         let inputURL = URL(fileURLWithPath: inputPath)
         let outputURL = URL(fileURLWithPath: outputPath)
 
@@ -166,13 +172,21 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                           userInfo: [NSLocalizedDescriptionKey: "No audio track found in \(inputPath)"])
         }
 
-        let outputSettings: [String: Any] = [
+        let bitsPerSample = targetBitDepth ?? 16
+
+        var outputSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
-            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMBitDepthKey: bitsPerSample,
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMIsBigEndianKey: false,
             AVLinearPCMIsNonInterleaved: false,
         ]
+        if let sr = targetSampleRate {
+            outputSettings[AVSampleRateKey] = sr
+        }
+        if let ch = targetChannels {
+            outputSettings[AVNumberOfChannelsKey] = ch
+        }
 
         let trackOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
         trackOutput.alwaysCopiesSampleData = false
@@ -212,9 +226,8 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             formatDesc as! CMAudioFormatDescription
         )!.pointee
 
-        let sampleRate = Int(asbd.mSampleRate)
-        let channels = Int(asbd.mChannelsPerFrame)
-        let bitsPerSample = 16
+        let sampleRate = targetSampleRate ?? Int(asbd.mSampleRate)
+        let channels = targetChannels ?? Int(asbd.mChannelsPerFrame)
 
         try writeWavFile(outputURL: outputURL, pcmData: pcmData,
                          sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample)
@@ -609,7 +622,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
 
     // MARK: - Bytes-based methods
 
-    private func convertToWavBytes(inputData: FlutterStandardTypedData, formatHint: String, result: @escaping FlutterResult) {
+    private func convertToWavBytes(inputData: FlutterStandardTypedData, formatHint: String, sampleRate: Int?, channels: Int?, bitDepth: Int?, result: @escaping FlutterResult) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let tempInputURL = try self.writeTempInput(data: inputData, formatHint: formatHint)
@@ -618,7 +631,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                     try? FileManager.default.removeItem(at: tempInputURL)
                     try? FileManager.default.removeItem(at: tempOutputURL)
                 }
-                try self.performConversion(inputPath: tempInputURL.path, outputPath: tempOutputURL.path)
+                try self.performConversion(inputPath: tempInputURL.path, outputPath: tempOutputURL.path, targetSampleRate: sampleRate, targetChannels: channels, targetBitDepth: bitDepth)
                 let outputData = try Data(contentsOf: tempOutputURL)
                 DispatchQueue.main.async {
                     result(FlutterStandardTypedData(bytes: outputData))

@@ -30,7 +30,9 @@ struct PcmResult {
 };
 
 static PcmResult DecodeToPcm(const std::string& inputPath,
-                              int64_t startMs = -1, int64_t endMs = -1) {
+                              int64_t startMs = -1, int64_t endMs = -1,
+                              int targetSampleRate = -1, int targetChannels = -1,
+                              int targetBitDepth = -1) {
     PcmResult result{};
 
     std::string uri;
@@ -45,10 +47,25 @@ static PcmResult DecodeToPcm(const std::string& inputPath,
         g_free(fileUri);
     }
 
+    // Determine output format based on bit depth
+    std::string gstFormat = "S16LE";
+    if (targetBitDepth == 8) gstFormat = "S8";
+    else if (targetBitDepth == 24) gstFormat = "S24LE";
+    else if (targetBitDepth == 32) gstFormat = "S32LE";
+
+    // Build caps string with optional rate/channels
+    std::string capsStr = "audio/x-raw,format=" + gstFormat;
+    if (targetSampleRate > 0) {
+        capsStr += ",rate=" + std::to_string(targetSampleRate);
+    }
+    if (targetChannels > 0) {
+        capsStr += ",channels=" + std::to_string(targetChannels);
+    }
+
     // Build pipeline: uridecodebin ! audioconvert ! audioresample ! appsink
     std::string pipeDesc =
         "uridecodebin uri=\"" + uri + "\" ! audioconvert ! audioresample ! "
-        "audio/x-raw,format=S16LE ! appsink name=sink sync=false";
+        + capsStr + " ! appsink name=sink sync=false";
 
     GError* error = nullptr;
     GstElement* pipeline = gst_parse_launch(pipeDesc.c_str(), &error);
@@ -184,8 +201,11 @@ static std::vector<uint8_t> ReadAndDeleteFile(const std::string& path) {
 // ---------------------------------------------------------------------------
 
 static std::string ConvertToWav(const std::string& inputPath,
-                                const std::string& outputPath) {
-    auto pcm = DecodeToPcm(inputPath);
+                                const std::string& outputPath,
+                                int targetSampleRate = -1,
+                                int targetChannels = -1,
+                                int targetBitDepth = -1) {
+    auto pcm = DecodeToPcm(inputPath, -1, -1, targetSampleRate, targetChannels, targetBitDepth);
     if (pcm.data.empty()) {
         throw std::runtime_error("No audio data decoded from input file");
     }
@@ -549,10 +569,21 @@ static void handle_method_call(AudioDecoderPlugin* self,
         std::string inputPath = fl_value_get_string(inputVal);
         std::string outputPath = fl_value_get_string(outputVal);
 
+        int targetSampleRate = -1, targetChannels = -1, targetBitDepth = -1;
+        FlValue* srVal = fl_value_lookup_string(args, "sampleRate");
+        if (srVal && fl_value_get_type(srVal) == FL_VALUE_TYPE_INT)
+            targetSampleRate = static_cast<int>(fl_value_get_int(srVal));
+        FlValue* chVal = fl_value_lookup_string(args, "channels");
+        if (chVal && fl_value_get_type(chVal) == FL_VALUE_TYPE_INT)
+            targetChannels = static_cast<int>(fl_value_get_int(chVal));
+        FlValue* bdVal = fl_value_lookup_string(args, "bitDepth");
+        if (bdVal && fl_value_get_type(bdVal) == FL_VALUE_TYPE_INT)
+            targetBitDepth = static_cast<int>(fl_value_get_int(bdVal));
+
         g_object_ref(method_call);
-        std::thread([method_call, inputPath, outputPath]() {
+        std::thread([method_call, inputPath, outputPath, targetSampleRate, targetChannels, targetBitDepth]() {
             try {
-                std::string result = ConvertToWav(inputPath, outputPath);
+                std::string result = ConvertToWav(inputPath, outputPath, targetSampleRate, targetChannels, targetBitDepth);
                 g_autoptr(FlValue) val = fl_value_new_string(result.c_str());
                 send_success(method_call, val);
             } catch (const std::exception& e) {
@@ -691,13 +722,24 @@ static void handle_method_call(AudioDecoderPlugin* self,
         std::vector<uint8_t> inputData(rawData, rawData + dataLen);
         std::string formatHint = fl_value_get_string(hintVal);
 
+        int targetSampleRate = -1, targetChannels = -1, targetBitDepth = -1;
+        FlValue* srVal = fl_value_lookup_string(args, "sampleRate");
+        if (srVal && fl_value_get_type(srVal) == FL_VALUE_TYPE_INT)
+            targetSampleRate = static_cast<int>(fl_value_get_int(srVal));
+        FlValue* chVal = fl_value_lookup_string(args, "channels");
+        if (chVal && fl_value_get_type(chVal) == FL_VALUE_TYPE_INT)
+            targetChannels = static_cast<int>(fl_value_get_int(chVal));
+        FlValue* bdVal = fl_value_lookup_string(args, "bitDepth");
+        if (bdVal && fl_value_get_type(bdVal) == FL_VALUE_TYPE_INT)
+            targetBitDepth = static_cast<int>(fl_value_get_int(bdVal));
+
         g_object_ref(method_call);
-        std::thread([method_call, inputData = std::move(inputData), formatHint]() {
+        std::thread([method_call, inputData = std::move(inputData), formatHint, targetSampleRate, targetChannels, targetBitDepth]() {
             try {
                 std::string tempInput = WriteTempFile(inputData, formatHint);
                 std::string tempOutput = WriteTempFile({}, "wav");
                 try {
-                    ConvertToWav(tempInput, tempOutput);
+                    ConvertToWav(tempInput, tempOutput, targetSampleRate, targetChannels, targetBitDepth);
                     auto outputBytes = ReadAndDeleteFile(tempOutput);
                     std::remove(tempInput.c_str());
                     g_autoptr(FlValue) val = fl_value_new_uint8_list(

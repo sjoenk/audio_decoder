@@ -104,11 +104,19 @@ void AudioDecoderPlugin::HandleMethodCall(
         std::string inputPath = std::get<std::string>(inputIt->second);
         std::string outputPath = std::get<std::string>(outputIt->second);
 
+        int targetSampleRate = -1, targetChannels = -1, targetBitDepth = -1;
+        auto srIt = args->find(flutter::EncodableValue("sampleRate"));
+        if (srIt != args->end()) targetSampleRate = std::get<int32_t>(srIt->second);
+        auto chIt = args->find(flutter::EncodableValue("channels"));
+        if (chIt != args->end()) targetChannels = std::get<int32_t>(chIt->second);
+        auto bdIt = args->find(flutter::EncodableValue("bitDepth"));
+        if (bdIt != args->end()) targetBitDepth = std::get<int32_t>(bdIt->second);
+
         auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
             std::move(result));
-        std::thread([this, inputPath, outputPath, shared_result]() {
+        std::thread([this, inputPath, outputPath, targetSampleRate, targetChannels, targetBitDepth, shared_result]() {
             try {
-                std::string output = ConvertToWav(inputPath, outputPath);
+                std::string output = ConvertToWav(inputPath, outputPath, targetSampleRate, targetChannels, targetBitDepth);
                 shared_result->Success(flutter::EncodableValue(output));
             } catch (const std::exception& e) {
                 shared_result->Error("CONVERSION_ERROR", e.what());
@@ -232,14 +240,22 @@ void AudioDecoderPlugin::HandleMethodCall(
         auto inputData = std::get<std::vector<uint8_t>>(dataIt->second);
         std::string formatHint = std::get<std::string>(hintIt->second);
 
+        int targetSampleRate = -1, targetChannels = -1, targetBitDepth = -1;
+        auto srIt = args->find(flutter::EncodableValue("sampleRate"));
+        if (srIt != args->end()) targetSampleRate = std::get<int32_t>(srIt->second);
+        auto chIt = args->find(flutter::EncodableValue("channels"));
+        if (chIt != args->end()) targetChannels = std::get<int32_t>(chIt->second);
+        auto bdIt = args->find(flutter::EncodableValue("bitDepth"));
+        if (bdIt != args->end()) targetBitDepth = std::get<int32_t>(bdIt->second);
+
         auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
             std::move(result));
-        std::thread([this, inputData = std::move(inputData), formatHint, shared_result]() {
+        std::thread([this, inputData = std::move(inputData), formatHint, targetSampleRate, targetChannels, targetBitDepth, shared_result]() {
             try {
                 std::string tempInput = WriteTempFile(inputData, formatHint);
                 std::string tempOutput = WriteTempFile({}, "wav");
                 try {
-                    ConvertToWav(tempInput, tempOutput);
+                    ConvertToWav(tempInput, tempOutput, targetSampleRate, targetChannels, targetBitDepth);
                     auto outputBytes = ReadAndDeleteFile(tempOutput);
                     DeleteFileW(Utf8ToWide(tempInput).c_str());
                     shared_result->Success(flutter::EncodableValue(outputBytes));
@@ -402,7 +418,8 @@ void AudioDecoderPlugin::HandleMethodCall(
 }
 
 AudioDecoderPlugin::PcmResult AudioDecoderPlugin::DecodeToPcm(
-    const std::string& inputPath, int64_t startMs, int64_t endMs) {
+    const std::string& inputPath, int64_t startMs, int64_t endMs,
+    int targetSampleRate, int targetChannels, int targetBitDepth) {
 
     MFSession session;
     if (!session.IsInitialized()) {
@@ -417,11 +434,19 @@ AudioDecoderPlugin::PcmResult AudioDecoderPlugin::DecodeToPcm(
         throw std::runtime_error("Failed to create source reader for input file");
     }
 
+    int bitsPerSample = (targetBitDepth > 0) ? targetBitDepth : 16;
+
     IMFMediaType* pPartialType = nullptr;
     MFCreateMediaType(&pPartialType);
     pPartialType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     pPartialType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    pPartialType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    pPartialType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, bitsPerSample);
+    if (targetSampleRate > 0) {
+        pPartialType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, targetSampleRate);
+    }
+    if (targetChannels > 0) {
+        pPartialType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, targetChannels);
+    }
 
     hr = pReader->SetCurrentMediaType(
         (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
@@ -505,9 +530,10 @@ AudioDecoderPlugin::PcmResult AudioDecoderPlugin::DecodeToPcm(
 }
 
 std::string AudioDecoderPlugin::ConvertToWav(
-    const std::string& inputPath, const std::string& outputPath) {
+    const std::string& inputPath, const std::string& outputPath,
+    int targetSampleRate, int targetChannels, int targetBitDepth) {
 
-    auto pcm = DecodeToPcm(inputPath);
+    auto pcm = DecodeToPcm(inputPath, -1, -1, targetSampleRate, targetChannels, targetBitDepth);
 
     if (pcm.data.empty()) {
         throw std::runtime_error("No audio data decoded from input file");
