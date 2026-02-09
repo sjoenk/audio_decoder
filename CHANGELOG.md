@@ -1,3 +1,10 @@
+## 0.5.0
+
+* Add optional `sampleRate`, `channels`, and `bitDepth` parameters to `convertToWav` and `convertToWavBytes`.
+* Control output sample rate (e.g., 44100, 22050), channel count (1 for mono, 2 for stereo), and bit depth (8, 16, 24, 32).
+* When omitted, defaults to the source sample rate/channels and 16-bit depth.
+* Supported on all platforms: Android, iOS, macOS, Windows, Linux, and Web.
+
 ## 0.4.0
 
 * Add web support using the Web Audio API.

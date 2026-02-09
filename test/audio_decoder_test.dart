@@ -8,7 +8,7 @@ import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 class MockAudioDecoderPlatform with MockPlatformInterfaceMixin implements AudioDecoderPlatform {
   @override
-  Future<String> convertToWav(String inputPath, String outputPath) => Future.value(outputPath);
+  Future<String> convertToWav(String inputPath, String outputPath, {int? sampleRate, int? channels, int? bitDepth}) => Future.value(outputPath);
 
   @override
   Future<String> convertToM4a(String inputPath, String outputPath) => Future.value(outputPath);
@@ -32,7 +32,7 @@ class MockAudioDecoderPlatform with MockPlatformInterfaceMixin implements AudioD
   Future<List<double>> getWaveform(String path, int numberOfSamples) => Future.value(List.filled(numberOfSamples, 0.5));
 
   @override
-  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint) =>
+  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint, {int? sampleRate, int? channels, int? bitDepth}) =>
       Future.value(Uint8List.fromList([0x52, 0x49, 0x46, 0x46])); // RIFF header stub
 
   @override
@@ -209,6 +209,51 @@ void main() {
       );
       expect(waveform.length, 30);
       expect(waveform.first, 0.7);
+    });
+  });
+
+  group('convertToWav with optional parameters', () {
+    late MockAudioDecoderPlatform fakePlatform;
+
+    setUp(() {
+      fakePlatform = MockAudioDecoderPlatform();
+      AudioDecoderPlatform.instance = fakePlatform;
+    });
+
+    test('convertToWav accepts sampleRate parameter', () async {
+      expect(
+        await AudioDecoder.convertToWav('/input/test.mp3', '/output/test.wav', sampleRate: 44100),
+        '/output/test.wav',
+      );
+    });
+
+    test('convertToWav accepts channels parameter', () async {
+      expect(
+        await AudioDecoder.convertToWav('/input/test.mp3', '/output/test.wav', channels: 1),
+        '/output/test.wav',
+      );
+    });
+
+    test('convertToWav accepts bitDepth parameter', () async {
+      expect(
+        await AudioDecoder.convertToWav('/input/test.mp3', '/output/test.wav', bitDepth: 24),
+        '/output/test.wav',
+      );
+    });
+
+    test('convertToWav accepts all parameters', () async {
+      expect(
+        await AudioDecoder.convertToWav('/input/test.mp3', '/output/test.wav',
+            sampleRate: 48000, channels: 2, bitDepth: 16),
+        '/output/test.wav',
+      );
+    });
+
+    test('convertToWavBytes accepts optional parameters', () async {
+      final input = Uint8List.fromList([1, 2, 3]);
+      final result = await AudioDecoder.convertToWavBytes(input,
+          formatHint: 'mp3', sampleRate: 22050, channels: 1, bitDepth: 8);
+      expect(result, isNotEmpty);
     });
   });
 }

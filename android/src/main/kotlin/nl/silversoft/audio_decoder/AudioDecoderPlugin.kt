@@ -42,9 +42,12 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                     result.error("INVALID_ARGUMENTS", "inputPath and outputPath are required", null)
                     return
                 }
+                val targetSampleRate = call.argument<Int>("sampleRate")
+                val targetChannels = call.argument<Int>("channels")
+                val targetBitDepth = call.argument<Int>("bitDepth")
                 thread {
                     try {
-                        performConversion(inputPath, outputPath)
+                        performConversion(inputPath, outputPath, targetSampleRate, targetChannels, targetBitDepth)
                         Handler(Looper.getMainLooper()).post {
                             result.success(outputPath)
                         }
@@ -143,12 +146,15 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                     result.error("INVALID_ARGUMENTS", "inputData and formatHint are required", null)
                     return
                 }
+                val targetSampleRate = call.argument<Int>("sampleRate")
+                val targetChannels = call.argument<Int>("channels")
+                val targetBitDepth = call.argument<Int>("bitDepth")
                 thread {
                     try {
                         val tempInput = writeTempInput(inputData, formatHint)
                         val tempOutput = File(context.cacheDir, "audio_decoder_out_${System.nanoTime()}.wav")
                         try {
-                            performConversion(tempInput.absolutePath, tempOutput.absolutePath)
+                            performConversion(tempInput.absolutePath, tempOutput.absolutePath, targetSampleRate, targetChannels, targetBitDepth)
                             val outputBytes = tempOutput.readBytes()
                             Handler(Looper.getMainLooper()).post { result.success(outputBytes) }
                         } finally {
@@ -280,7 +286,7 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
 
     // region Convert to WAV
 
-    private fun performConversion(inputPath: String, outputPath: String) {
+    private fun performConversion(inputPath: String, outputPath: String, targetSampleRate: Int? = null, targetChannels: Int? = null, targetBitDepth: Int? = null) {
         val extractor = MediaExtractor()
         extractor.setDataSource(inputPath)
 
@@ -303,9 +309,9 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         extractor.selectTrack(audioTrackIndex)
 
         val mime = format.getString(MediaFormat.KEY_MIME)!!
-        val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-        val bitsPerSample = 16
+        val srcSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+        val srcChannelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+        val bitsPerSample = targetBitDepth ?: 16
 
         val codec = MediaCodec.createDecoderByType(mime)
         codec.configure(format, null, null, 0)
@@ -359,12 +365,111 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         codec.release()
         extractor.release()
 
-        val pcmData = pcmOutput.toByteArray()
+        var pcmData = pcmOutput.toByteArray()
+        var sampleRate = srcSampleRate
+        var channelCount = srcChannelCount
+
+        // Convert channels if needed (source is 16-bit PCM from decoder)
+        if (targetChannels != null && targetChannels != srcChannelCount) {
+            pcmData = convertChannels(pcmData, srcChannelCount, targetChannels)
+            channelCount = targetChannels
+        }
+
+        // Resample if needed
+        if (targetSampleRate != null && targetSampleRate != srcSampleRate) {
+            pcmData = resamplePcm(pcmData, srcSampleRate, targetSampleRate, channelCount)
+            sampleRate = targetSampleRate
+        }
+
+        // Convert bit depth if needed (source is always 16-bit from MediaCodec)
+        if (bitsPerSample != 16) {
+            pcmData = convertBitDepth(pcmData, 16, bitsPerSample)
+        }
 
         FileOutputStream(File(outputPath)).use { fos ->
             fos.write(buildWavHeader(pcmData.size, sampleRate, channelCount, bitsPerSample))
             fos.write(pcmData)
         }
+    }
+
+    private fun convertChannels(pcmData: ByteArray, srcChannels: Int, dstChannels: Int): ByteArray {
+        val srcBytesPerFrame = srcChannels * 2 // 16-bit
+        val dstBytesPerFrame = dstChannels * 2
+        val numFrames = pcmData.size / srcBytesPerFrame
+        val output = ByteArray(numFrames * dstBytesPerFrame)
+        val srcBuf = ByteBuffer.wrap(pcmData).order(ByteOrder.LITTLE_ENDIAN)
+        val dstBuf = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN)
+
+        for (i in 0 until numFrames) {
+            val samples = ShortArray(srcChannels)
+            for (ch in 0 until srcChannels) {
+                samples[ch] = srcBuf.getShort(i * srcBytesPerFrame + ch * 2)
+            }
+            if (dstChannels < srcChannels) {
+                // Mix down to fewer channels
+                var sum = 0L
+                for (s in samples) sum += s.toLong()
+                val mixed = (sum / srcChannels).toInt().coerceIn(-32768, 32767).toShort()
+                for (ch in 0 until dstChannels) {
+                    dstBuf.putShort(i * dstBytesPerFrame + ch * 2, mixed)
+                }
+            } else {
+                // Upmix: duplicate existing channels
+                for (ch in 0 until dstChannels) {
+                    dstBuf.putShort(i * dstBytesPerFrame + ch * 2, samples[if (ch < srcChannels) ch else 0])
+                }
+            }
+        }
+        return output
+    }
+
+    private fun resamplePcm(pcmData: ByteArray, srcRate: Int, dstRate: Int, channels: Int): ByteArray {
+        val bytesPerFrame = channels * 2 // 16-bit
+        val srcFrames = pcmData.size / bytesPerFrame
+        val dstFrames = (srcFrames.toLong() * dstRate / srcRate).toInt()
+        val output = ByteArray(dstFrames * bytesPerFrame)
+        val srcBuf = ByteBuffer.wrap(pcmData).order(ByteOrder.LITTLE_ENDIAN)
+        val dstBuf = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN)
+
+        for (i in 0 until dstFrames) {
+            val srcPos = i.toDouble() * (srcFrames - 1) / max(1, dstFrames - 1)
+            val srcIdx = srcPos.toInt()
+            val frac = srcPos - srcIdx
+            val nextIdx = min(srcIdx + 1, srcFrames - 1)
+
+            for (ch in 0 until channels) {
+                val s0 = srcBuf.getShort(srcIdx * bytesPerFrame + ch * 2).toInt()
+                val s1 = srcBuf.getShort(nextIdx * bytesPerFrame + ch * 2).toInt()
+                val interpolated = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767).toShort()
+                dstBuf.putShort(i * bytesPerFrame + ch * 2, interpolated)
+            }
+        }
+        return output
+    }
+
+    private fun convertBitDepth(pcmData: ByteArray, srcBits: Int, dstBits: Int): ByteArray {
+        val srcBytesPerSample = srcBits / 8
+        val dstBytesPerSample = dstBits / 8
+        val numSamples = pcmData.size / srcBytesPerSample
+        val output = ByteArray(numSamples * dstBytesPerSample)
+        val srcBuf = ByteBuffer.wrap(pcmData).order(ByteOrder.LITTLE_ENDIAN)
+        val dstBuf = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN)
+
+        for (i in 0 until numSamples) {
+            val sample16 = srcBuf.getShort(i * srcBytesPerSample).toInt()
+            when (dstBits) {
+                8 -> output[i] = ((sample16 / 256) + 128).coerceIn(0, 255).toByte()
+                16 -> dstBuf.putShort(i * 2, sample16.toShort())
+                24 -> {
+                    val s24 = sample16 shl 8
+                    output[i * 3] = (s24 and 0xFF).toByte()
+                    output[i * 3 + 1] = ((s24 shr 8) and 0xFF).toByte()
+                    output[i * 3 + 2] = ((s24 shr 16) and 0xFF).toByte()
+                }
+                32 -> dstBuf.putInt(i * 4, sample16 shl 16)
+            }
+        }
+        return output
     }
 
     // endregion
