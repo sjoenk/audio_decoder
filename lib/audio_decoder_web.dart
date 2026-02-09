@@ -25,7 +25,7 @@ class AudioDecoderWeb extends AudioDecoderPlatform {
   // --- File-based methods (not supported on web) ---
 
   @override
-  Future<String> convertToWav(String inputPath, String outputPath) {
+  Future<String> convertToWav(String inputPath, String outputPath, {int? sampleRate, int? channels, int? bitDepth}) {
     throw UnsupportedError(
         'File-based operations are not supported on web. Use convertToWavBytes instead.');
   }
@@ -72,21 +72,48 @@ class AudioDecoderWeb extends AudioDecoderPlatform {
   }
 
   Uint8List _encodeWav(web.AudioBuffer buffer,
-      {int? startSample, int? endSample}) {
+      {int? startSample, int? endSample, int? targetChannels, int? targetBitDepth}) {
     final sampleRate = buffer.sampleRate.toInt();
-    final numChannels = buffer.numberOfChannels;
+    final srcChannels = buffer.numberOfChannels;
+    final numChannels = targetChannels ?? srcChannels;
     final start = startSample ?? 0;
     final end = endSample ?? buffer.length;
     final numFrames = end - start;
-    const bitsPerSample = 16;
-    final blockAlign = numChannels * bitsPerSample ~/ 8;
+    final bitsPerSample = targetBitDepth ?? 16;
+    final bytesPerSample = bitsPerSample ~/ 8;
+    final blockAlign = numChannels * bytesPerSample;
     final dataSize = numFrames * blockAlign;
     final fileSize = 44 + dataSize;
 
     final channels = <Float32List>[];
-    for (var ch = 0; ch < numChannels; ch++) {
+    for (var ch = 0; ch < srcChannels; ch++) {
       final full = buffer.getChannelData(ch).toDart;
       channels.add(full.sublist(start, end));
+    }
+
+    // Mix channels if needed
+    final outChannels = <Float32List>[];
+    if (numChannels == srcChannels) {
+      outChannels.addAll(channels);
+    } else if (numChannels < srcChannels) {
+      // Mix down (e.g., stereo to mono)
+      final mono = Float32List(numFrames);
+      for (var i = 0; i < numFrames; i++) {
+        var sum = 0.0;
+        for (var ch = 0; ch < srcChannels; ch++) {
+          sum += channels[ch][i];
+        }
+        mono[i] = sum / srcChannels;
+      }
+      outChannels.add(mono);
+      for (var ch = 1; ch < numChannels; ch++) {
+        outChannels.add(Float32List.fromList(mono));
+      }
+    } else {
+      // Upmix (e.g., mono to stereo): duplicate first channel
+      for (var ch = 0; ch < numChannels; ch++) {
+        outChannels.add(channels[ch < srcChannels ? ch : 0]);
+      }
     }
 
     final data = ByteData(fileSize);
@@ -127,12 +154,26 @@ class AudioDecoderWeb extends AudioDecoderPlatform {
     pos += 4;
 
     // Interleaved PCM samples
+    final maxVal = (1 << (bitsPerSample - 1)) - 1;
+    final minVal = -(1 << (bitsPerSample - 1));
     for (var i = 0; i < numFrames; i++) {
       for (var ch = 0; ch < numChannels; ch++) {
-        final sample =
-            (channels[ch][i] * 32767).round().clamp(-32768, 32767);
-        data.setInt16(pos, sample, Endian.little);
-        pos += 2;
+        final sample = (outChannels[ch][i] * maxVal).round().clamp(minVal, maxVal);
+        if (bitsPerSample == 8) {
+          data.setUint8(pos, (sample + 128) & 0xFF);
+          pos += 1;
+        } else if (bitsPerSample == 16) {
+          data.setInt16(pos, sample, Endian.little);
+          pos += 2;
+        } else if (bitsPerSample == 24) {
+          data.setUint8(pos, sample & 0xFF);
+          data.setUint8(pos + 1, (sample >> 8) & 0xFF);
+          data.setUint8(pos + 2, (sample >> 16) & 0xFF);
+          pos += 3;
+        } else if (bitsPerSample == 32) {
+          data.setInt32(pos, sample, Endian.little);
+          pos += 4;
+        }
       }
     }
 
@@ -141,14 +182,32 @@ class AudioDecoderWeb extends AudioDecoderPlatform {
 
   @override
   Future<Uint8List> convertToWavBytes(
-      Uint8List inputData, String formatHint) async {
+      Uint8List inputData, String formatHint, {int? sampleRate, int? channels, int? bitDepth}) async {
     try {
-      final buffer = await _decodeAudioData(inputData);
-      return _encodeWav(buffer);
+      var buffer = await _decodeAudioData(inputData);
+      if (sampleRate != null && sampleRate != buffer.sampleRate.toInt()) {
+        buffer = await _resample(buffer, sampleRate);
+      }
+      return _encodeWav(buffer, targetChannels: channels, targetBitDepth: bitDepth);
     } catch (e) {
       if (e is AudioConversionException) rethrow;
       throw AudioConversionException('WAV conversion failed: $e');
     }
+  }
+
+  Future<web.AudioBuffer> _resample(web.AudioBuffer buffer, int targetSampleRate) async {
+    final duration = buffer.duration;
+    final targetLength = (duration * targetSampleRate).ceil();
+    final offlineCtx = web.OfflineAudioContext(
+      buffer.numberOfChannels.toJS,
+      targetLength,
+      targetSampleRate.toDouble(),
+    );
+    final source = offlineCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(offlineCtx.destination);
+    source.start();
+    return await offlineCtx.startRendering().toDart;
   }
 
   @override

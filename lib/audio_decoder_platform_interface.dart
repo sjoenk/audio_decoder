@@ -27,7 +27,7 @@ abstract class AudioDecoderPlatform extends PlatformInterface {
     _instance = instance;
   }
 
-  Future<String> convertToWav(String inputPath, String outputPath) {
+  Future<String> convertToWav(String inputPath, String outputPath, {int? sampleRate, int? channels, int? bitDepth}) {
     throw UnimplementedError('convertToWav() has not been implemented.');
   }
 
@@ -47,7 +47,7 @@ abstract class AudioDecoderPlatform extends PlatformInterface {
     throw UnimplementedError('getWaveform() has not been implemented.');
   }
 
-  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint) {
+  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint, {int? sampleRate, int? channels, int? bitDepth}) {
     throw UnimplementedError('convertToWavBytes() has not been implemented.');
   }
 

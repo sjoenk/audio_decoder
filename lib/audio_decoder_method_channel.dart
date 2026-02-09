@@ -12,11 +12,18 @@ class MethodChannelAudioDecoder extends AudioDecoderPlatform {
   final methodChannel = const MethodChannel('audio_decoder');
 
   @override
-  Future<String> convertToWav(String inputPath, String outputPath) async {
+  Future<String> convertToWav(String inputPath, String outputPath, {int? sampleRate, int? channels, int? bitDepth}) async {
     try {
+      final args = <String, dynamic>{
+        'inputPath': inputPath,
+        'outputPath': outputPath,
+      };
+      if (sampleRate != null) args['sampleRate'] = sampleRate;
+      if (channels != null) args['channels'] = channels;
+      if (bitDepth != null) args['bitDepth'] = bitDepth;
       final result = await methodChannel.invokeMethod<String>(
         'convertToWav',
-        {'inputPath': inputPath, 'outputPath': outputPath},
+        args,
       );
       if (result == null) {
         throw AudioConversionException('Native conversion returned null');
@@ -118,11 +125,18 @@ class MethodChannelAudioDecoder extends AudioDecoderPlatform {
   }
 
   @override
-  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint) async {
+  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint, {int? sampleRate, int? channels, int? bitDepth}) async {
     try {
+      final args = <String, dynamic>{
+        'inputData': inputData,
+        'formatHint': formatHint,
+      };
+      if (sampleRate != null) args['sampleRate'] = sampleRate;
+      if (channels != null) args['channels'] = channels;
+      if (bitDepth != null) args['bitDepth'] = bitDepth;
       final result = await methodChannel.invokeMethod<Uint8List>(
         'convertToWavBytes',
-        {'inputData': inputData, 'formatHint': formatHint},
+        args,
       );
       if (result == null) {
         throw AudioConversionException('Native conversion returned null');

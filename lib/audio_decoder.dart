@@ -15,11 +15,20 @@ class AudioDecoder {
   ///
   /// [inputPath] is the absolute path to the source audio file.
   /// [outputPath] is the absolute path where the WAV file will be written.
+  /// [sampleRate] optionally sets the output sample rate (e.g., 44100). Defaults to source sample rate.
+  /// [channels] optionally sets the number of output channels (e.g., 1 for mono, 2 for stereo). Defaults to source channels.
+  /// [bitDepth] optionally sets the output bit depth (e.g., 16, 24). Defaults to 16.
   ///
   /// Returns the output path on success.
   /// Throws [AudioConversionException] on failure.
-  static Future<String> convertToWav(String inputPath, String outputPath) {
-    return AudioDecoderPlatform.instance.convertToWav(inputPath, outputPath);
+  static Future<String> convertToWav(
+    String inputPath,
+    String outputPath, {
+    int? sampleRate,
+    int? channels,
+    int? bitDepth,
+  }) {
+    return AudioDecoderPlatform.instance.convertToWav(inputPath, outputPath, sampleRate: sampleRate, channels: channels, bitDepth: bitDepth);
   }
 
   /// Converts an audio file (MP3, WAV, FLAC, etc.) to M4A (AAC) format.
@@ -112,11 +121,20 @@ class AudioDecoder {
   ///
   /// [inputData] is the raw bytes of the source audio file.
   /// [formatHint] indicates the input format (e.g., 'mp3', 'm4a', 'aac').
+  /// [sampleRate] optionally sets the output sample rate (e.g., 44100). Defaults to source sample rate.
+  /// [channels] optionally sets the number of output channels (e.g., 1 for mono, 2 for stereo). Defaults to source channels.
+  /// [bitDepth] optionally sets the output bit depth (e.g., 16, 24). Defaults to 16.
   ///
   /// Returns the WAV file bytes.
   /// Throws [AudioConversionException] on failure.
-  static Future<Uint8List> convertToWavBytes(Uint8List inputData, {required String formatHint}) {
-    return AudioDecoderPlatform.instance.convertToWavBytes(inputData, formatHint);
+  static Future<Uint8List> convertToWavBytes(
+    Uint8List inputData, {
+    required String formatHint,
+    int? sampleRate,
+    int? channels,
+    int? bitDepth,
+  }) {
+    return AudioDecoderPlatform.instance.convertToWavBytes(inputData, formatHint, sampleRate: sampleRate, channels: channels, bitDepth: bitDepth);
   }
 
   /// Converts audio bytes to M4A (AAC) format.
