@@ -22,21 +22,62 @@ using flutter::MethodResultFunctions;
 
 }  // namespace
 
-TEST(AudioDecoderPlugin, GetPlatformVersion) {
+TEST(AudioDecoderPlugin, UnknownMethodReturnsNotImplemented) {
   AudioDecoderPlugin plugin;
-  // Save the reply value from the success callback.
-  std::string result_string;
+  bool not_implemented = false;
   plugin.HandleMethodCall(
-      MethodCall("getPlatformVersion", std::make_unique<EncodableValue>()),
+      MethodCall("unknownMethod", std::make_unique<EncodableValue>()),
       std::make_unique<MethodResultFunctions<>>(
-          [&result_string](const EncodableValue* result) {
-            result_string = std::get<std::string>(*result);
-          },
-          nullptr, nullptr));
+          nullptr, nullptr,
+          [&not_implemented]() { not_implemented = true; }));
 
-  // Since the exact string varies by host, just ensure that it's a string
-  // with the expected format.
-  EXPECT_TRUE(result_string.rfind("Windows ", 0) == 0);
+  EXPECT_TRUE(not_implemented);
+}
+
+TEST(AudioDecoderPlugin, ConvertToWavMissingArgsReturnsError) {
+  AudioDecoderPlugin plugin;
+  std::string error_code;
+  plugin.HandleMethodCall(
+      MethodCall("convertToWav", std::make_unique<EncodableValue>()),
+      std::make_unique<MethodResultFunctions<>>(
+          nullptr,
+          [&error_code](const std::string& code, const std::string&,
+                        const EncodableValue*) { error_code = code; },
+          nullptr));
+
+  EXPECT_EQ(error_code, "INVALID_ARGUMENTS");
+}
+
+TEST(AudioDecoderPlugin, ConvertToM4aMissingArgsReturnsError) {
+  AudioDecoderPlugin plugin;
+  std::string error_code;
+  plugin.HandleMethodCall(
+      MethodCall("convertToM4a", std::make_unique<EncodableValue>()),
+      std::make_unique<MethodResultFunctions<>>(
+          nullptr,
+          [&error_code](const std::string& code, const std::string&,
+                        const EncodableValue*) { error_code = code; },
+          nullptr));
+
+  EXPECT_EQ(error_code, "INVALID_ARGUMENTS");
+}
+
+TEST(AudioDecoderPlugin, ConvertToWavMissingPathsReturnsError) {
+  AudioDecoderPlugin plugin;
+  std::string error_code;
+  // Pass a map with only inputPath, missing outputPath
+  EncodableMap args;
+  args[EncodableValue("inputPath")] = EncodableValue("test.mp3");
+  plugin.HandleMethodCall(
+      MethodCall("convertToWav",
+                 std::make_unique<EncodableValue>(args)),
+      std::make_unique<MethodResultFunctions<>>(
+          nullptr,
+          [&error_code](const std::string& code, const std::string&,
+                        const EncodableValue*) { error_code = code; },
+          nullptr));
+
+  EXPECT_EQ(error_code, "INVALID_ARGUMENTS");
 }
 
 }  // namespace test
