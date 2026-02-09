@@ -1,8 +1,104 @@
-
 import 'audio_decoder_platform_interface.dart';
+import 'audio_info.dart';
+
+export 'audio_conversion_exception.dart';
+export 'audio_info.dart';
 
 class AudioDecoder {
-  Future<String?> getPlatformVersion() {
-    return AudioDecoderPlatform.instance.getPlatformVersion();
+  /// Converts an audio file (MP3, M4A, AAC, etc.) to WAV format.
+  ///
+  /// [inputPath] is the absolute path to the source audio file.
+  /// [outputPath] is the absolute path where the WAV file will be written.
+  ///
+  /// Returns the output path on success.
+  /// Throws [AudioConversionException] on failure.
+  static Future<String> convertToWav(String inputPath, String outputPath) {
+    return AudioDecoderPlatform.instance.convertToWav(inputPath, outputPath);
+  }
+
+  /// Converts an audio file (MP3, WAV, FLAC, etc.) to M4A (AAC) format.
+  ///
+  /// [inputPath] is the absolute path to the source audio file.
+  /// [outputPath] is the absolute path where the M4A file will be written.
+  ///
+  /// Returns the output path on success.
+  /// Throws [AudioConversionException] on failure.
+  static Future<String> convertToM4a(String inputPath, String outputPath) {
+    return AudioDecoderPlatform.instance.convertToM4a(inputPath, outputPath);
+  }
+
+  /// Returns metadata about the audio file at [path].
+  ///
+  /// Includes duration, sample rate, channel count, bit rate, and format.
+  /// Throws [AudioConversionException] if the file cannot be read.
+  static Future<AudioInfo> getAudioInfo(String path) {
+    return AudioDecoderPlatform.instance.getAudioInfo(path);
+  }
+
+  /// Trims the audio file to the specified time range.
+  ///
+  /// [inputPath] is the absolute path to the source audio file.
+  /// [outputPath] is the absolute path where the trimmed file will be written.
+  /// The output format is determined by the file extension (.wav or .m4a).
+  /// [start] and [end] define the time range to extract.
+  ///
+  /// Returns the output path on success.
+  /// Throws [AudioConversionException] on failure.
+  static Future<String> trimAudio(
+    String inputPath,
+    String outputPath,
+    Duration start,
+    Duration end,
+  ) {
+    return AudioDecoderPlatform.instance.trimAudio(inputPath, outputPath, start, end);
+  }
+
+  /// Extracts waveform amplitude data from the audio file.
+  ///
+  /// Returns a list of [numberOfSamples] normalized amplitude values (0.0–1.0).
+  /// Useful for rendering waveform visualizations.
+  ///
+  /// Throws [AudioConversionException] if the file cannot be decoded.
+  static Future<List<double>> getWaveform(
+    String path, {
+    int numberOfSamples = 100,
+  }) {
+    return AudioDecoderPlatform.instance.getWaveform(path, numberOfSamples);
+  }
+
+  /// Known audio extensions that can be converted to WAV.
+  ///
+  /// The native decoders may support additional formats beyond this list.
+  /// You can always call [convertToWav] directly — it will throw an
+  /// [AudioConversionException] if the platform cannot decode the file.
+  static const supportedExtensions = {
+    '.mp3',
+    '.m4a',
+    '.aac',
+    '.mp4',
+    '.ogg',
+    '.oga',
+    '.opus',
+    '.flac',
+    '.wma',
+    '.aiff',
+    '.aif',
+    '.amr',
+    '.caf',
+    '.alac',
+    '.webm',
+  };
+
+  /// Returns true if the file at [path] needs conversion to WAV.
+  ///
+  /// Returns `false` for files that are already WAV. Returns `true` for
+  /// known audio formats in [supportedExtensions]. Returns `false` for
+  /// unknown extensions (you can still try [convertToWav] directly).
+  static bool needsConversion(String path) {
+    final lower = path.toLowerCase();
+    if (lower.endsWith('.wav') || lower.endsWith('.wave')) {
+      return false;
+    }
+    return supportedExtensions.any((ext) => lower.endsWith(ext));
   }
 }
