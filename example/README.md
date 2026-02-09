@@ -1,16 +1,16 @@
-# audio_decoder_example
+# audio_decoder example
 
-Demonstrates how to use the audio_decoder plugin.
+Demonstrates audio conversion using the audio_decoder plugin.
 
-## Getting Started
+## Running the example
 
-This project is a starting point for a Flutter application.
+```bash
+cd example
+flutter run
+```
 
-A few resources to get you started if this is your first Flutter project:
+The app includes two bundled test tones (1-second 440Hz sine wave):
+- **test_tone.mp3** — for testing MP3 to WAV conversion
+- **test_tone.m4a** — for testing M4A to WAV conversion
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+Tap either button to copy the asset to a temp directory and convert it to WAV.
