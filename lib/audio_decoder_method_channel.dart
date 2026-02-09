@@ -5,6 +5,8 @@ import 'audio_conversion_exception.dart';
 import 'audio_decoder_platform_interface.dart';
 import 'audio_info.dart';
 
+/// Platform implementation of audio_decoder that uses a method channel to
+/// communicate with native platform code.
 class MethodChannelAudioDecoder extends AudioDecoderPlatform {
   @visibleForTesting
   final methodChannel = const MethodChannel('audio_decoder');

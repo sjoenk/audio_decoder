@@ -13,7 +13,7 @@ A lightweight Flutter plugin for converting, trimming, and analyzing audio files
 - Extract waveform amplitude data for visualization
 - **Bytes API** — work with in-memory audio (`Uint8List`) without file paths
 - Uses native platform APIs — no bundled codecs or heavy dependencies
-- Supports Android, iOS, macOS, Windows, and Linux
+- Supports Android, iOS, macOS, Windows, Linux, and Web
 - Minimal app size impact (~500KB vs ~15-30MB for FFmpeg)
 
 ## Platform APIs
@@ -25,6 +25,7 @@ A lightweight Flutter plugin for converting, trimming, and analyzing audio files
 | Android | MediaExtractor + MediaCodec |
 | Windows | Media Foundation (IMFSourceReader) |
 | Linux | GStreamer |
+| Web | Web Audio API |
 
 ## Getting started
 
@@ -32,7 +33,7 @@ Add `audio_decoder` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  audio_decoder: ^0.3.0
+  audio_decoder: ^0.4.0
 ```
 
 Or install via the command line:
@@ -185,6 +186,13 @@ The native decoders may support additional formats. You can always call `convert
 | Android | API 24 |
 | Windows | 7+ |
 | Linux | GStreamer 1.0+ |
+| Web | Modern browser with Web Audio API |
+
+### Web limitations
+
+- **File-based methods** (`convertToWav`, `convertToM4a`, `getAudioInfo`, `trimAudio`, `getWaveform`) are not available on web. Use the bytes-based API instead.
+- **M4A encoding** is not supported on web — browsers do not provide a reliable AAC/M4A encoding API. Use `convertToWavBytes` instead.
+- **Trimming** output is always WAV on web.
 
 ## License
 

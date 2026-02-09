@@ -1,3 +1,10 @@
+## 0.4.0
+
+* Add web support using the Web Audio API.
+* Bytes-based methods (`convertToWavBytes`, `getAudioInfoBytes`, `trimAudioBytes`, `getWaveformBytes`) are fully supported on web.
+* File-based methods throw `UnsupportedError` on web — use the bytes API instead.
+* M4A encoding is not available on web (browser limitation).
+
 ## 0.3.0
 
 * Add Linux support using GStreamer.

@@ -6,6 +6,10 @@ import 'audio_info.dart';
 export 'audio_conversion_exception.dart';
 export 'audio_info.dart';
 
+/// A lightweight audio decoder and converter using native platform APIs.
+///
+/// Provides static methods for converting, trimming, analyzing, and extracting
+/// waveform data from audio files and in-memory audio bytes.
 class AudioDecoder {
   /// Converts an audio file (MP3, M4A, AAC, etc.) to WAV format.
   ///
