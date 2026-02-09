@@ -1,3 +1,9 @@
+## 0.3.0
+
+* Add Linux support using GStreamer.
+* All file-based and bytes-based methods are now available on Linux.
+* Requires GStreamer 1.0+ (pre-installed on most Linux distributions).
+
 ## 0.2.0
 
 * Add bytes-based API for in-memory audio processing — no file paths needed.

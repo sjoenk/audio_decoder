@@ -13,7 +13,7 @@ A lightweight Flutter plugin for converting, trimming, and analyzing audio files
 - Extract waveform amplitude data for visualization
 - **Bytes API** — work with in-memory audio (`Uint8List`) without file paths
 - Uses native platform APIs — no bundled codecs or heavy dependencies
-- Supports Android, iOS, macOS, and Windows
+- Supports Android, iOS, macOS, Windows, and Linux
 - Minimal app size impact (~500KB vs ~15-30MB for FFmpeg)
 
 ## Platform APIs
@@ -24,6 +24,7 @@ A lightweight Flutter plugin for converting, trimming, and analyzing audio files
 | macOS | AVFoundation (AVAssetReader) |
 | Android | MediaExtractor + MediaCodec |
 | Windows | Media Foundation (IMFSourceReader) |
+| Linux | GStreamer |
 
 ## Getting started
 
@@ -31,7 +32,7 @@ Add `audio_decoder` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  audio_decoder: ^0.2.0
+  audio_decoder: ^0.3.0
 ```
 
 Or install via the command line:
@@ -41,6 +42,12 @@ flutter pub add audio_decoder
 ```
 
 No additional setup is needed — the plugin uses built-in platform APIs.
+
+On **Linux**, GStreamer is required (pre-installed on most distributions). If needed:
+
+```sh
+sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+```
 
 ## Usage
 
@@ -177,6 +184,7 @@ The native decoders may support additional formats. You can always call `convert
 | macOS | 10.13 |
 | Android | API 24 |
 | Windows | 7+ |
+| Linux | GStreamer 1.0+ |
 
 ## License
 
