@@ -18,10 +18,45 @@ void main() {
       MethodCall methodCall,
     ) async {
       expect(methodCall.method, 'convertToWav');
-      expect(methodCall.arguments, {
-        'inputPath': '/input/test.mp3',
-        'outputPath': '/output/test.wav',
-      });
+      expect(methodCall.arguments['inputPath'], '/input/test.mp3');
+      expect(methodCall.arguments['outputPath'], '/output/test.wav');
+      return '/output/test.wav';
+    });
+
+    expect(
+      await platform.convertToWav('/input/test.mp3', '/output/test.wav'),
+      '/output/test.wav',
+    );
+  });
+
+  test('convertToWav sends optional parameters when provided', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      MethodCall methodCall,
+    ) async {
+      expect(methodCall.method, 'convertToWav');
+      expect(methodCall.arguments['inputPath'], '/input/test.mp3');
+      expect(methodCall.arguments['outputPath'], '/output/test.wav');
+      expect(methodCall.arguments['sampleRate'], 44100);
+      expect(methodCall.arguments['channels'], 1);
+      expect(methodCall.arguments['bitDepth'], 24);
+      return '/output/test.wav';
+    });
+
+    expect(
+      await platform.convertToWav('/input/test.mp3', '/output/test.wav',
+          sampleRate: 44100, channels: 1, bitDepth: 24),
+      '/output/test.wav',
+    );
+  });
+
+  test('convertToWav omits null optional parameters', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+      MethodCall methodCall,
+    ) async {
+      expect(methodCall.method, 'convertToWav');
+      expect(methodCall.arguments.containsKey('sampleRate'), false);
+      expect(methodCall.arguments.containsKey('channels'), false);
+      expect(methodCall.arguments.containsKey('bitDepth'), false);
       return '/output/test.wav';
     });
 
@@ -277,6 +312,23 @@ void main() {
         () => platform.convertToWavBytes(testInput, 'mp3'),
         throwsA(isA<AudioConversionException>()),
       );
+    });
+
+    test('convertToWavBytes sends optional parameters when provided', () async {
+      final wavBytes = Uint8List.fromList([0x52, 0x49, 0x46, 0x46]);
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        MethodCall methodCall,
+      ) async {
+        expect(methodCall.method, 'convertToWavBytes');
+        expect(methodCall.arguments['sampleRate'], 22050);
+        expect(methodCall.arguments['channels'], 1);
+        expect(methodCall.arguments['bitDepth'], 8);
+        return wavBytes;
+      });
+
+      final result = await platform.convertToWavBytes(testInput, 'mp3',
+          sampleRate: 22050, channels: 1, bitDepth: 8);
+      expect(result, wavBytes);
     });
   });
 }
