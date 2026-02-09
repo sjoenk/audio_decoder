@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
 import 'audio_decoder_method_channel.dart';
@@ -35,5 +37,25 @@ abstract class AudioDecoderPlatform extends PlatformInterface {
 
   Future<List<double>> getWaveform(String path, int numberOfSamples) {
     throw UnimplementedError('getWaveform() has not been implemented.');
+  }
+
+  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint) {
+    throw UnimplementedError('convertToWavBytes() has not been implemented.');
+  }
+
+  Future<Uint8List> convertToM4aBytes(Uint8List inputData, String formatHint) {
+    throw UnimplementedError('convertToM4aBytes() has not been implemented.');
+  }
+
+  Future<AudioInfo> getAudioInfoBytes(Uint8List inputData, String formatHint) {
+    throw UnimplementedError('getAudioInfoBytes() has not been implemented.');
+  }
+
+  Future<Uint8List> trimAudioBytes(Uint8List inputData, String formatHint, Duration start, Duration end, {String outputFormat = 'wav'}) {
+    throw UnimplementedError('trimAudioBytes() has not been implemented.');
+  }
+
+  Future<List<double>> getWaveformBytes(Uint8List inputData, String formatHint, int numberOfSamples) {
+    throw UnimplementedError('getWaveformBytes() has not been implemented.');
   }
 }
