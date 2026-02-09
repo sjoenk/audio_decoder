@@ -1,3 +1,10 @@
-## 0.0.1
+## 0.1.0
 
-* TODO: Describe initial release.
+* Initial release of `audio_decoder`.
+* Convert audio files to WAV format (`convertToWav`) — supports MP3, M4A, AAC, OGG, OPUS, FLAC, WMA, AIFF, AMR, CAF, ALAC, and WebM.
+* Convert audio files to M4A/AAC format (`convertToM4a`).
+* Retrieve audio metadata (`getAudioInfo`) — duration, sample rate, channels, bit rate, and format.
+* Trim audio files to a specific time range (`trimAudio`).
+* Extract waveform amplitude data for visualizations (`getWaveform`).
+* Platform support: Android, iOS, macOS, and Windows.
+* Typed exception handling via `AudioConversionException`.
