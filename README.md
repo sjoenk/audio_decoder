@@ -33,7 +33,7 @@ Add `audio_decoder` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  audio_decoder: ^0.4.0
+  audio_decoder: ^0.5.0
 ```
 
 Or install via the command line:
@@ -59,6 +59,15 @@ import 'package:audio_decoder/audio_decoder.dart';
 final wavPath = await AudioDecoder.convertToWav(
   '/path/to/song.mp3',
   '/path/to/output.wav',
+);
+
+// Convert to WAV with custom encoding
+final wavPath2 = await AudioDecoder.convertToWav(
+  '/path/to/song.mp3',
+  '/path/to/output.wav',
+  sampleRate: 44100,  // optional: target sample rate
+  channels: 1,        // optional: 1 = mono, 2 = stereo
+  bitDepth: 24,       // optional: 8, 16, 24, or 32
 );
 
 // Convert to M4A (AAC compressed)
@@ -123,6 +132,15 @@ final wavBytes = await AudioDecoder.convertToWavBytes(
   formatHint: 'mp3',
 );
 
+// Convert bytes to WAV with custom encoding
+final wavBytes2 = await AudioDecoder.convertToWavBytes(
+  mp3Bytes,
+  formatHint: 'mp3',
+  sampleRate: 22050,
+  channels: 1,
+  bitDepth: 16,
+);
+
 // Get metadata from bytes
 final info = await AudioDecoder.getAudioInfoBytes(
   mp3Bytes,
@@ -168,8 +186,8 @@ The native decoders may support additional formats. You can always call `convert
 ## Output formats
 
 ### WAV
-- PCM signed 16-bit little-endian
-- Original sample rate and channel count preserved
+- PCM signed little-endian (16-bit by default, configurable to 8, 24, or 32-bit)
+- Sample rate and channel count default to source values, optionally overridable
 - Standard 44-byte RIFF/WAVE header
 
 ### M4A
