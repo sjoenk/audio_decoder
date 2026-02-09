@@ -11,6 +11,7 @@ A lightweight Flutter plugin for converting, trimming, and analyzing audio files
 - Get audio metadata (duration, sample rate, channels, bit rate, format)
 - Trim audio files to a specific time range
 - Extract waveform amplitude data for visualization
+- **Bytes API** — work with in-memory audio (`Uint8List`) without file paths
 - Uses native platform APIs — no bundled codecs or heavy dependencies
 - Supports Android, iOS, macOS, and Windows
 - Minimal app size impact (~500KB vs ~15-30MB for FFmpeg)
@@ -30,7 +31,7 @@ Add `audio_decoder` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  audio_decoder: ^0.1.0
+  audio_decoder: ^0.2.0
 ```
 
 Or install via the command line:
@@ -97,6 +98,46 @@ final waveform = await AudioDecoder.getWaveform(
 );
 // waveform = [0.12, 0.45, 0.87, 0.23, ...]
 ```
+
+### Bytes API (in-memory)
+
+Work directly with audio bytes — no file paths needed. Ideal for network responses, Flutter assets, or other in-memory sources.
+
+```dart
+import 'dart:typed_data';
+
+// Load audio bytes from any source
+final Uint8List mp3Bytes = await fetchFromNetwork();
+
+// Convert bytes to WAV
+final wavBytes = await AudioDecoder.convertToWavBytes(
+  mp3Bytes,
+  formatHint: 'mp3',
+);
+
+// Get metadata from bytes
+final info = await AudioDecoder.getAudioInfoBytes(
+  mp3Bytes,
+  formatHint: 'mp3',
+);
+
+// Trim audio bytes
+final trimmed = await AudioDecoder.trimAudioBytes(
+  mp3Bytes,
+  formatHint: 'mp3',
+  start: Duration(seconds: 10),
+  end: Duration(seconds: 30),
+);
+
+// Extract waveform from bytes
+final waveform = await AudioDecoder.getWaveformBytes(
+  mp3Bytes,
+  formatHint: 'mp3',
+  numberOfSamples: 100,
+);
+```
+
+The `formatHint` parameter tells the native decoder what format the bytes are in (e.g., `'mp3'`, `'m4a'`, `'wav'`, `'aac'`).
 
 ### Error handling
 

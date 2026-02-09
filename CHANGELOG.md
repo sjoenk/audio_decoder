@@ -1,3 +1,14 @@
+## 0.2.0
+
+* Add bytes-based API for in-memory audio processing — no file paths needed.
+  * `convertToWavBytes` — convert audio bytes to WAV format.
+  * `convertToM4aBytes` — convert audio bytes to M4A format.
+  * `getAudioInfoBytes` — retrieve metadata from audio bytes.
+  * `trimAudioBytes` — trim audio bytes to a time range.
+  * `getWaveformBytes` — extract waveform data from audio bytes.
+* All bytes methods accept a `formatHint` parameter to indicate the input format.
+* Ideal for network responses, Flutter assets, and other in-memory audio sources.
+
 ## 0.1.0
 
 * Initial release of `audio_decoder`.
