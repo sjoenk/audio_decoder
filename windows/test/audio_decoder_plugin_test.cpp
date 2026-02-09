@@ -80,5 +80,75 @@ TEST(AudioDecoderPlugin, ConvertToWavMissingPathsReturnsError) {
   EXPECT_EQ(error_code, "INVALID_ARGUMENTS");
 }
 
+TEST(AudioDecoderPlugin, ConvertToWavBytesMissingArgsReturnsError) {
+  AudioDecoderPlugin plugin;
+  std::string error_code;
+  plugin.HandleMethodCall(
+      MethodCall("convertToWavBytes", std::make_unique<EncodableValue>()),
+      std::make_unique<MethodResultFunctions<>>(
+          nullptr,
+          [&error_code](const std::string& code, const std::string&,
+                        const EncodableValue*) { error_code = code; },
+          nullptr));
+
+  EXPECT_EQ(error_code, "INVALID_ARGUMENTS");
+}
+
+TEST(AudioDecoderPlugin, ConvertToM4aBytesMissingArgsReturnsError) {
+  AudioDecoderPlugin plugin;
+  std::string error_code;
+  plugin.HandleMethodCall(
+      MethodCall("convertToM4aBytes", std::make_unique<EncodableValue>()),
+      std::make_unique<MethodResultFunctions<>>(
+          nullptr,
+          [&error_code](const std::string& code, const std::string&,
+                        const EncodableValue*) { error_code = code; },
+          nullptr));
+
+  EXPECT_EQ(error_code, "INVALID_ARGUMENTS");
+}
+
+TEST(AudioDecoderPlugin, GetAudioInfoBytesMissingArgsReturnsError) {
+  AudioDecoderPlugin plugin;
+  std::string error_code;
+  plugin.HandleMethodCall(
+      MethodCall("getAudioInfoBytes", std::make_unique<EncodableValue>()),
+      std::make_unique<MethodResultFunctions<>>(
+          nullptr,
+          [&error_code](const std::string& code, const std::string&,
+                        const EncodableValue*) { error_code = code; },
+          nullptr));
+
+  EXPECT_EQ(error_code, "INVALID_ARGUMENTS");
+}
+
+TEST(AudioDecoderPlugin, TrimAudioBytesMissingArgsReturnsError) {
+  AudioDecoderPlugin plugin;
+  std::string error_code;
+  plugin.HandleMethodCall(
+      MethodCall("trimAudioBytes", std::make_unique<EncodableValue>()),
+      std::make_unique<MethodResultFunctions<>>(
+          nullptr,
+          [&error_code](const std::string& code, const std::string&,
+                        const EncodableValue*) { error_code = code; },
+          nullptr));
+
+  EXPECT_EQ(error_code, "INVALID_ARGUMENTS");
+}
+
+TEST(AudioDecoderPlugin, GetWaveformBytesMissingArgsReturnsError) {
+  AudioDecoderPlugin plugin;
+  std::string error_code;
+  plugin.HandleMethodCall(
+      MethodCall("getWaveformBytes", std::make_unique<EncodableValue>()),
+      std::make_unique<MethodResultFunctions<>>(
+          nullptr,
+          [&error_code](const std::string& code, const std::string&,
+                        const EncodableValue*) { error_code = code; },
+          nullptr));
+
+  EXPECT_EQ(error_code, "INVALID_ARGUMENTS");
+}
+
 }  // namespace test
 }  // namespace audio_decoder

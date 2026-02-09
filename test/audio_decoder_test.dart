@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:audio_decoder/audio_decoder.dart';
 import 'package:audio_decoder/audio_decoder_platform_interface.dart';
@@ -28,6 +30,33 @@ class MockAudioDecoderPlatform with MockPlatformInterfaceMixin implements AudioD
 
   @override
   Future<List<double>> getWaveform(String path, int numberOfSamples) => Future.value(List.filled(numberOfSamples, 0.5));
+
+  @override
+  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint) =>
+      Future.value(Uint8List.fromList([0x52, 0x49, 0x46, 0x46])); // RIFF header stub
+
+  @override
+  Future<Uint8List> convertToM4aBytes(Uint8List inputData, String formatHint) =>
+      Future.value(Uint8List.fromList([0x00, 0x00, 0x00, 0x20])); // ftyp header stub
+
+  @override
+  Future<AudioInfo> getAudioInfoBytes(Uint8List inputData, String formatHint) => Future.value(
+    const AudioInfo(
+      duration: Duration(seconds: 3),
+      sampleRate: 48000,
+      channels: 1,
+      bitRate: 192000,
+      format: 'mp3',
+    ),
+  );
+
+  @override
+  Future<Uint8List> trimAudioBytes(Uint8List inputData, String formatHint, Duration start, Duration end, {String outputFormat = 'wav'}) =>
+      Future.value(Uint8List.fromList([0x52, 0x49, 0x46, 0x46]));
+
+  @override
+  Future<List<double>> getWaveformBytes(Uint8List inputData, String formatHint, int numberOfSamples) =>
+      Future.value(List.filled(numberOfSamples, 0.7));
 }
 
 void main() {
@@ -125,6 +154,61 @@ void main() {
     test('returns false for unknown extensions', () {
       expect(AudioDecoder.needsConversion('/path/to/file.xyz'), false);
       expect(AudioDecoder.needsConversion('/path/to/file.txt'), false);
+    });
+  });
+
+  group('bytes API', () {
+    late MockAudioDecoderPlatform fakePlatform;
+
+    setUp(() {
+      fakePlatform = MockAudioDecoderPlatform();
+      AudioDecoderPlatform.instance = fakePlatform;
+    });
+
+    test('convertToWavBytes delegates to platform', () async {
+      final input = Uint8List.fromList([1, 2, 3]);
+      final result = await AudioDecoder.convertToWavBytes(input, formatHint: 'mp3');
+      expect(result, isNotEmpty);
+      expect(result[0], 0x52); // 'R' from RIFF
+    });
+
+    test('convertToM4aBytes delegates to platform', () async {
+      final input = Uint8List.fromList([1, 2, 3]);
+      final result = await AudioDecoder.convertToM4aBytes(input, formatHint: 'wav');
+      expect(result, isNotEmpty);
+      expect(result[0], 0x00);
+    });
+
+    test('getAudioInfoBytes delegates to platform', () async {
+      final input = Uint8List.fromList([1, 2, 3]);
+      final info = await AudioDecoder.getAudioInfoBytes(input, formatHint: 'mp3');
+      expect(info.duration, const Duration(seconds: 3));
+      expect(info.sampleRate, 48000);
+      expect(info.channels, 1);
+      expect(info.bitRate, 192000);
+      expect(info.format, 'mp3');
+    });
+
+    test('trimAudioBytes delegates to platform', () async {
+      final input = Uint8List.fromList([1, 2, 3]);
+      final result = await AudioDecoder.trimAudioBytes(
+        input,
+        formatHint: 'mp3',
+        start: const Duration(seconds: 1),
+        end: const Duration(seconds: 2),
+      );
+      expect(result, isNotEmpty);
+    });
+
+    test('getWaveformBytes delegates to platform', () async {
+      final input = Uint8List.fromList([1, 2, 3]);
+      final waveform = await AudioDecoder.getWaveformBytes(
+        input,
+        formatHint: 'mp3',
+        numberOfSamples: 30,
+      );
+      expect(waveform.length, 30);
+      expect(waveform.first, 0.7);
     });
   });
 }
