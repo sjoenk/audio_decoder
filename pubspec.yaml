@@ -1,6 +1,6 @@
 name: audio_decoder
 description: "A lightweight Flutter plugin for converting, trimming, and analyzing audio files using native platform APIs. No FFmpeg required."
-version: 0.3.0
+version: 0.4.0
 homepage: https://www.silversoft.nl
 repository: https://github.com/sjoenk/audio_decoder
 
@@ -11,7 +11,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_web_plugins:
+    sdk: flutter
   plugin_platform_interface: ^2.0.2
+  web: ^1.1.0
 
 dev_dependencies:
   flutter_test:
@@ -46,6 +49,9 @@ flutter:
         pluginClass: AudioDecoderPlugin
       windows:
         pluginClass: AudioDecoderPluginCApi
+      web:
+        pluginClass: AudioDecoderWeb
+        fileName: audio_decoder_web.dart
 
   # To add assets to your plugin package, add an assets section, like this:
   # assets:
