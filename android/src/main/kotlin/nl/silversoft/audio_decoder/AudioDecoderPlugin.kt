@@ -13,6 +13,7 @@ import io.flutter.plugin.common.MethodChannel.Result
 import android.media.MediaCodecInfo
 import android.media.MediaMuxer
 import java.io.ByteArrayOutputStream
+import android.content.Context
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
@@ -24,10 +25,12 @@ import kotlin.math.min
 
 class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
     private lateinit var channel: MethodChannel
+    private lateinit var context: Context
 
     override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
         channel = MethodChannel(flutterPluginBinding.binaryMessenger, "audio_decoder")
         channel.setMethodCallHandler(this)
+        context = flutterPluginBinding.applicationContext
     }
 
     override fun onMethodCall(call: MethodCall, result: Result) {
@@ -133,9 +136,147 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                     }
                 }
             }
+            "convertToWavBytes" -> {
+                val inputData = call.argument<ByteArray>("inputData")
+                val formatHint = call.argument<String>("formatHint")
+                if (inputData == null || formatHint == null) {
+                    result.error("INVALID_ARGUMENTS", "inputData and formatHint are required", null)
+                    return
+                }
+                thread {
+                    try {
+                        val tempInput = writeTempInput(inputData, formatHint)
+                        val tempOutput = File(context.cacheDir, "audio_decoder_out_${System.nanoTime()}.wav")
+                        try {
+                            performConversion(tempInput.absolutePath, tempOutput.absolutePath)
+                            val outputBytes = tempOutput.readBytes()
+                            Handler(Looper.getMainLooper()).post { result.success(outputBytes) }
+                        } finally {
+                            tempInput.delete()
+                            tempOutput.delete()
+                        }
+                    } catch (e: Exception) {
+                        Handler(Looper.getMainLooper()).post {
+                            result.error("CONVERSION_ERROR", e.message, null)
+                        }
+                    }
+                }
+            }
+            "convertToM4aBytes" -> {
+                val inputData = call.argument<ByteArray>("inputData")
+                val formatHint = call.argument<String>("formatHint")
+                if (inputData == null || formatHint == null) {
+                    result.error("INVALID_ARGUMENTS", "inputData and formatHint are required", null)
+                    return
+                }
+                thread {
+                    try {
+                        val tempInput = writeTempInput(inputData, formatHint)
+                        val tempOutput = File(context.cacheDir, "audio_decoder_out_${System.nanoTime()}.m4a")
+                        try {
+                            performM4aConversion(tempInput.absolutePath, tempOutput.absolutePath)
+                            val outputBytes = tempOutput.readBytes()
+                            Handler(Looper.getMainLooper()).post { result.success(outputBytes) }
+                        } finally {
+                            tempInput.delete()
+                            tempOutput.delete()
+                        }
+                    } catch (e: Exception) {
+                        Handler(Looper.getMainLooper()).post {
+                            result.error("CONVERSION_ERROR", e.message, null)
+                        }
+                    }
+                }
+            }
+            "getAudioInfoBytes" -> {
+                val inputData = call.argument<ByteArray>("inputData")
+                val formatHint = call.argument<String>("formatHint")
+                if (inputData == null || formatHint == null) {
+                    result.error("INVALID_ARGUMENTS", "inputData and formatHint are required", null)
+                    return
+                }
+                thread {
+                    try {
+                        val tempInput = writeTempInput(inputData, formatHint)
+                        try {
+                            val info = performGetAudioInfo(tempInput.absolutePath)
+                            Handler(Looper.getMainLooper()).post { result.success(info) }
+                        } finally {
+                            tempInput.delete()
+                        }
+                    } catch (e: Exception) {
+                        Handler(Looper.getMainLooper()).post {
+                            result.error("INFO_ERROR", e.message, null)
+                        }
+                    }
+                }
+            }
+            "trimAudioBytes" -> {
+                val inputData = call.argument<ByteArray>("inputData")
+                val formatHint = call.argument<String>("formatHint")
+                val startMs = call.argument<Int>("startMs")
+                val endMs = call.argument<Int>("endMs")
+                val outputFormat = call.argument<String>("outputFormat") ?: "wav"
+                if (inputData == null || formatHint == null || startMs == null || endMs == null) {
+                    result.error("INVALID_ARGUMENTS", "inputData, formatHint, startMs and endMs are required", null)
+                    return
+                }
+                thread {
+                    try {
+                        val tempInput = writeTempInput(inputData, formatHint)
+                        val tempOutput = File(context.cacheDir, "audio_decoder_out_${System.nanoTime()}.$outputFormat")
+                        try {
+                            performTrimAudio(tempInput.absolutePath, tempOutput.absolutePath, startMs.toLong(), endMs.toLong())
+                            val outputBytes = tempOutput.readBytes()
+                            Handler(Looper.getMainLooper()).post { result.success(outputBytes) }
+                        } finally {
+                            tempInput.delete()
+                            tempOutput.delete()
+                        }
+                    } catch (e: Exception) {
+                        Handler(Looper.getMainLooper()).post {
+                            result.error("TRIM_ERROR", e.message, null)
+                        }
+                    }
+                }
+            }
+            "getWaveformBytes" -> {
+                val inputData = call.argument<ByteArray>("inputData")
+                val formatHint = call.argument<String>("formatHint")
+                val numberOfSamples = call.argument<Int>("numberOfSamples")
+                if (inputData == null || formatHint == null || numberOfSamples == null) {
+                    result.error("INVALID_ARGUMENTS", "inputData, formatHint and numberOfSamples are required", null)
+                    return
+                }
+                thread {
+                    try {
+                        val tempInput = writeTempInput(inputData, formatHint)
+                        try {
+                            val waveform = performGetWaveform(tempInput.absolutePath, numberOfSamples)
+                            Handler(Looper.getMainLooper()).post { result.success(waveform) }
+                        } finally {
+                            tempInput.delete()
+                        }
+                    } catch (e: Exception) {
+                        Handler(Looper.getMainLooper()).post {
+                            result.error("WAVEFORM_ERROR", e.message, null)
+                        }
+                    }
+                }
+            }
             else -> result.notImplemented()
         }
     }
+
+    // region Temp file helpers
+
+    private fun writeTempInput(data: ByteArray, formatHint: String): File {
+        val tempFile = File(context.cacheDir, "audio_decoder_in_${System.nanoTime()}.$formatHint")
+        tempFile.writeBytes(data)
+        return tempFile
+    }
+
+    // endregion
 
     // region Convert to WAV
 

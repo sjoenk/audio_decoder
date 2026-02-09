@@ -75,6 +75,50 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                 return
             }
             getWaveform(path: path, numberOfSamples: numberOfSamples, result: result)
+        case "convertToWavBytes":
+            guard let args = call.arguments as? [String: Any],
+                  let inputData = args["inputData"] as? FlutterStandardTypedData,
+                  let formatHint = args["formatHint"] as? String else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "inputData and formatHint are required", details: nil))
+                return
+            }
+            convertToWavBytes(inputData: inputData, formatHint: formatHint, result: result)
+        case "convertToM4aBytes":
+            guard let args = call.arguments as? [String: Any],
+                  let inputData = args["inputData"] as? FlutterStandardTypedData,
+                  let formatHint = args["formatHint"] as? String else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "inputData and formatHint are required", details: nil))
+                return
+            }
+            convertToM4aBytes(inputData: inputData, formatHint: formatHint, result: result)
+        case "getAudioInfoBytes":
+            guard let args = call.arguments as? [String: Any],
+                  let inputData = args["inputData"] as? FlutterStandardTypedData,
+                  let formatHint = args["formatHint"] as? String else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "inputData and formatHint are required", details: nil))
+                return
+            }
+            getAudioInfoBytes(inputData: inputData, formatHint: formatHint, result: result)
+        case "trimAudioBytes":
+            guard let args = call.arguments as? [String: Any],
+                  let inputData = args["inputData"] as? FlutterStandardTypedData,
+                  let formatHint = args["formatHint"] as? String,
+                  let startMs = args["startMs"] as? Int,
+                  let endMs = args["endMs"] as? Int else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "inputData, formatHint, startMs and endMs are required", details: nil))
+                return
+            }
+            let outputFormat = args["outputFormat"] as? String ?? "wav"
+            trimAudioBytes(inputData: inputData, formatHint: formatHint, startMs: startMs, endMs: endMs, outputFormat: outputFormat, result: result)
+        case "getWaveformBytes":
+            guard let args = call.arguments as? [String: Any],
+                  let inputData = args["inputData"] as? FlutterStandardTypedData,
+                  let formatHint = args["formatHint"] as? String,
+                  let numberOfSamples = args["numberOfSamples"] as? Int else {
+                result(FlutterError(code: "INVALID_ARGUMENTS", message: "inputData, formatHint and numberOfSamples are required", details: nil))
+                return
+            }
+            getWaveformBytes(inputData: inputData, formatHint: formatHint, numberOfSamples: numberOfSamples, result: result)
         default:
             result(FlutterMethodNotImplemented)
         }
@@ -545,6 +589,128 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
         }
 
         return waveform
+    }
+
+    // MARK: - Temp file helper
+
+    private func writeTempInput(data: FlutterStandardTypedData, formatHint: String) throws -> URL {
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileName = "audio_decoder_in_\(ProcessInfo.processInfo.globallyUniqueString).\(formatHint)"
+        let url = tempDir.appendingPathComponent(fileName)
+        try data.data.write(to: url)
+        return url
+    }
+
+    private func tempOutputURL(ext: String) -> URL {
+        let tempDir = FileManager.default.temporaryDirectory
+        let fileName = "audio_decoder_out_\(ProcessInfo.processInfo.globallyUniqueString).\(ext)"
+        return tempDir.appendingPathComponent(fileName)
+    }
+
+    // MARK: - Bytes-based methods
+
+    private func convertToWavBytes(inputData: FlutterStandardTypedData, formatHint: String, result: @escaping FlutterResult) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let tempInputURL = try self.writeTempInput(data: inputData, formatHint: formatHint)
+                let tempOutputURL = self.tempOutputURL(ext: "wav")
+                defer {
+                    try? FileManager.default.removeItem(at: tempInputURL)
+                    try? FileManager.default.removeItem(at: tempOutputURL)
+                }
+                try self.performConversion(inputPath: tempInputURL.path, outputPath: tempOutputURL.path)
+                let outputData = try Data(contentsOf: tempOutputURL)
+                DispatchQueue.main.async {
+                    result(FlutterStandardTypedData(bytes: outputData))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "CONVERSION_ERROR", message: error.localizedDescription, details: nil))
+                }
+            }
+        }
+    }
+
+    private func convertToM4aBytes(inputData: FlutterStandardTypedData, formatHint: String, result: @escaping FlutterResult) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let tempInputURL = try self.writeTempInput(data: inputData, formatHint: formatHint)
+                let tempOutputURL = self.tempOutputURL(ext: "m4a")
+                defer {
+                    try? FileManager.default.removeItem(at: tempInputURL)
+                    try? FileManager.default.removeItem(at: tempOutputURL)
+                }
+                try self.performM4aConversion(inputPath: tempInputURL.path, outputPath: tempOutputURL.path)
+                let outputData = try Data(contentsOf: tempOutputURL)
+                DispatchQueue.main.async {
+                    result(FlutterStandardTypedData(bytes: outputData))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "CONVERSION_ERROR", message: error.localizedDescription, details: nil))
+                }
+            }
+        }
+    }
+
+    private func getAudioInfoBytes(inputData: FlutterStandardTypedData, formatHint: String, result: @escaping FlutterResult) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let tempInputURL = try self.writeTempInput(data: inputData, formatHint: formatHint)
+                defer {
+                    try? FileManager.default.removeItem(at: tempInputURL)
+                }
+                let info = try self.performGetAudioInfo(path: tempInputURL.path)
+                DispatchQueue.main.async {
+                    result(info)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "INFO_ERROR", message: error.localizedDescription, details: nil))
+                }
+            }
+        }
+    }
+
+    private func trimAudioBytes(inputData: FlutterStandardTypedData, formatHint: String, startMs: Int, endMs: Int, outputFormat: String, result: @escaping FlutterResult) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let tempInputURL = try self.writeTempInput(data: inputData, formatHint: formatHint)
+                let tempOutputURL = self.tempOutputURL(ext: outputFormat)
+                defer {
+                    try? FileManager.default.removeItem(at: tempInputURL)
+                    try? FileManager.default.removeItem(at: tempOutputURL)
+                }
+                try self.performTrimAudio(inputPath: tempInputURL.path, outputPath: tempOutputURL.path, startMs: startMs, endMs: endMs)
+                let outputData = try Data(contentsOf: tempOutputURL)
+                DispatchQueue.main.async {
+                    result(FlutterStandardTypedData(bytes: outputData))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "TRIM_ERROR", message: error.localizedDescription, details: nil))
+                }
+            }
+        }
+    }
+
+    private func getWaveformBytes(inputData: FlutterStandardTypedData, formatHint: String, numberOfSamples: Int, result: @escaping FlutterResult) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let tempInputURL = try self.writeTempInput(data: inputData, formatHint: formatHint)
+                defer {
+                    try? FileManager.default.removeItem(at: tempInputURL)
+                }
+                let waveform = try self.performGetWaveform(path: tempInputURL.path, numberOfSamples: numberOfSamples)
+                DispatchQueue.main.async {
+                    result(waveform)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "WAVEFORM_ERROR", message: error.localizedDescription, details: nil))
+                }
+            }
+        }
     }
 
     // MARK: - WAV writing helper

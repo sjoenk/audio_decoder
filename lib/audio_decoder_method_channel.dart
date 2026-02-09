@@ -114,4 +114,111 @@ class MethodChannelAudioDecoder extends AudioDecoderPlatform {
       );
     }
   }
+
+  @override
+  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint) async {
+    try {
+      final result = await methodChannel.invokeMethod<Uint8List>(
+        'convertToWavBytes',
+        {'inputData': inputData, 'formatHint': formatHint},
+      );
+      if (result == null) {
+        throw AudioConversionException('Native conversion returned null');
+      }
+      return result;
+    } on PlatformException catch (e) {
+      throw AudioConversionException(
+        e.message ?? 'Unknown conversion error',
+        details: e.details?.toString(),
+      );
+    }
+  }
+
+  @override
+  Future<Uint8List> convertToM4aBytes(Uint8List inputData, String formatHint) async {
+    try {
+      final result = await methodChannel.invokeMethod<Uint8List>(
+        'convertToM4aBytes',
+        {'inputData': inputData, 'formatHint': formatHint},
+      );
+      if (result == null) {
+        throw AudioConversionException('Native conversion returned null');
+      }
+      return result;
+    } on PlatformException catch (e) {
+      throw AudioConversionException(
+        e.message ?? 'Unknown conversion error',
+        details: e.details?.toString(),
+      );
+    }
+  }
+
+  @override
+  Future<AudioInfo> getAudioInfoBytes(Uint8List inputData, String formatHint) async {
+    try {
+      final result = await methodChannel.invokeMapMethod<String, dynamic>(
+        'getAudioInfoBytes',
+        {'inputData': inputData, 'formatHint': formatHint},
+      );
+      if (result == null) {
+        throw AudioConversionException('Native getAudioInfo returned null');
+      }
+      return AudioInfo(
+        duration: Duration(milliseconds: result['durationMs'] as int),
+        sampleRate: result['sampleRate'] as int,
+        channels: result['channels'] as int,
+        bitRate: result['bitRate'] as int,
+        format: result['format'] as String,
+      );
+    } on PlatformException catch (e) {
+      throw AudioConversionException(
+        e.message ?? 'Unknown error',
+        details: e.details?.toString(),
+      );
+    }
+  }
+
+  @override
+  Future<Uint8List> trimAudioBytes(Uint8List inputData, String formatHint, Duration start, Duration end, {String outputFormat = 'wav'}) async {
+    try {
+      final result = await methodChannel.invokeMethod<Uint8List>(
+        'trimAudioBytes',
+        {
+          'inputData': inputData,
+          'formatHint': formatHint,
+          'startMs': start.inMilliseconds,
+          'endMs': end.inMilliseconds,
+          'outputFormat': outputFormat,
+        },
+      );
+      if (result == null) {
+        throw AudioConversionException('Native trimAudio returned null');
+      }
+      return result;
+    } on PlatformException catch (e) {
+      throw AudioConversionException(
+        e.message ?? 'Unknown error',
+        details: e.details?.toString(),
+      );
+    }
+  }
+
+  @override
+  Future<List<double>> getWaveformBytes(Uint8List inputData, String formatHint, int numberOfSamples) async {
+    try {
+      final result = await methodChannel.invokeListMethod<double>(
+        'getWaveformBytes',
+        {'inputData': inputData, 'formatHint': formatHint, 'numberOfSamples': numberOfSamples},
+      );
+      if (result == null) {
+        throw AudioConversionException('Native getWaveform returned null');
+      }
+      return result;
+    } on PlatformException catch (e) {
+      throw AudioConversionException(
+        e.message ?? 'Unknown error',
+        details: e.details?.toString(),
+      );
+    }
+  }
 }

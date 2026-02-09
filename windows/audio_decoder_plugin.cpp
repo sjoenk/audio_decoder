@@ -33,6 +33,14 @@ static std::wstring Utf8ToWide(const std::string& utf8) {
     return wide;
 }
 
+static std::string WideToUtf8(const std::wstring& wide) {
+    if (wide.empty()) return {};
+    int size = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string utf8(size - 1, 0);
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), -1, &utf8[0], size, nullptr, nullptr);
+    return utf8;
+}
+
 class MFSession {
 public:
     MFSession() : initialized_(false) {
@@ -205,6 +213,184 @@ void AudioDecoderPlugin::HandleMethodCall(
             try {
                 auto waveform = GetWaveform(path, numberOfSamples);
                 shared_result->Success(flutter::EncodableValue(waveform));
+            } catch (const std::exception& e) {
+                shared_result->Error("WAVEFORM_ERROR", e.what());
+            }
+        }).detach();
+
+    } else if (method_call.method_name() == "convertToWavBytes") {
+        if (!args) {
+            result->Error("INVALID_ARGUMENTS", "Arguments map is required");
+            return;
+        }
+        auto dataIt = args->find(flutter::EncodableValue("inputData"));
+        auto hintIt = args->find(flutter::EncodableValue("formatHint"));
+        if (dataIt == args->end() || hintIt == args->end()) {
+            result->Error("INVALID_ARGUMENTS", "inputData and formatHint are required");
+            return;
+        }
+        auto inputData = std::get<std::vector<uint8_t>>(dataIt->second);
+        std::string formatHint = std::get<std::string>(hintIt->second);
+
+        auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
+            std::move(result));
+        std::thread([this, inputData = std::move(inputData), formatHint, shared_result]() {
+            try {
+                std::string tempInput = WriteTempFile(inputData, formatHint);
+                std::string tempOutput = WriteTempFile({}, "wav");
+                try {
+                    ConvertToWav(tempInput, tempOutput);
+                    auto outputBytes = ReadAndDeleteFile(tempOutput);
+                    DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    shared_result->Success(flutter::EncodableValue(outputBytes));
+                } catch (...) {
+                    DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    DeleteFileW(Utf8ToWide(tempOutput).c_str());
+                    throw;
+                }
+            } catch (const std::exception& e) {
+                shared_result->Error("CONVERSION_ERROR", e.what());
+            }
+        }).detach();
+
+    } else if (method_call.method_name() == "convertToM4aBytes") {
+        if (!args) {
+            result->Error("INVALID_ARGUMENTS", "Arguments map is required");
+            return;
+        }
+        auto dataIt = args->find(flutter::EncodableValue("inputData"));
+        auto hintIt = args->find(flutter::EncodableValue("formatHint"));
+        if (dataIt == args->end() || hintIt == args->end()) {
+            result->Error("INVALID_ARGUMENTS", "inputData and formatHint are required");
+            return;
+        }
+        auto inputData = std::get<std::vector<uint8_t>>(dataIt->second);
+        std::string formatHint = std::get<std::string>(hintIt->second);
+
+        auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
+            std::move(result));
+        std::thread([this, inputData = std::move(inputData), formatHint, shared_result]() {
+            try {
+                std::string tempInput = WriteTempFile(inputData, formatHint);
+                std::string tempOutput = WriteTempFile({}, "m4a");
+                try {
+                    ConvertToM4a(tempInput, tempOutput);
+                    auto outputBytes = ReadAndDeleteFile(tempOutput);
+                    DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    shared_result->Success(flutter::EncodableValue(outputBytes));
+                } catch (...) {
+                    DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    DeleteFileW(Utf8ToWide(tempOutput).c_str());
+                    throw;
+                }
+            } catch (const std::exception& e) {
+                shared_result->Error("CONVERSION_ERROR", e.what());
+            }
+        }).detach();
+
+    } else if (method_call.method_name() == "getAudioInfoBytes") {
+        if (!args) {
+            result->Error("INVALID_ARGUMENTS", "Arguments map is required");
+            return;
+        }
+        auto dataIt = args->find(flutter::EncodableValue("inputData"));
+        auto hintIt = args->find(flutter::EncodableValue("formatHint"));
+        if (dataIt == args->end() || hintIt == args->end()) {
+            result->Error("INVALID_ARGUMENTS", "inputData and formatHint are required");
+            return;
+        }
+        auto inputData = std::get<std::vector<uint8_t>>(dataIt->second);
+        std::string formatHint = std::get<std::string>(hintIt->second);
+
+        auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
+            std::move(result));
+        std::thread([this, inputData = std::move(inputData), formatHint, shared_result]() {
+            try {
+                std::string tempInput = WriteTempFile(inputData, formatHint);
+                try {
+                    auto info = GetAudioInfo(tempInput);
+                    DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    shared_result->Success(flutter::EncodableValue(info));
+                } catch (...) {
+                    DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    throw;
+                }
+            } catch (const std::exception& e) {
+                shared_result->Error("INFO_ERROR", e.what());
+            }
+        }).detach();
+
+    } else if (method_call.method_name() == "trimAudioBytes") {
+        if (!args) {
+            result->Error("INVALID_ARGUMENTS", "Arguments map is required");
+            return;
+        }
+        auto dataIt = args->find(flutter::EncodableValue("inputData"));
+        auto hintIt = args->find(flutter::EncodableValue("formatHint"));
+        auto startIt = args->find(flutter::EncodableValue("startMs"));
+        auto endIt = args->find(flutter::EncodableValue("endMs"));
+        auto fmtIt = args->find(flutter::EncodableValue("outputFormat"));
+        if (dataIt == args->end() || hintIt == args->end() ||
+            startIt == args->end() || endIt == args->end()) {
+            result->Error("INVALID_ARGUMENTS", "inputData, formatHint, startMs and endMs are required");
+            return;
+        }
+        auto inputData = std::get<std::vector<uint8_t>>(dataIt->second);
+        std::string formatHint = std::get<std::string>(hintIt->second);
+        int64_t startMs = std::get<int32_t>(startIt->second);
+        int64_t endMs = std::get<int32_t>(endIt->second);
+        std::string outputFormat = (fmtIt != args->end()) ? std::get<std::string>(fmtIt->second) : "wav";
+
+        auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
+            std::move(result));
+        std::thread([this, inputData = std::move(inputData), formatHint, startMs, endMs, outputFormat, shared_result]() {
+            try {
+                std::string tempInput = WriteTempFile(inputData, formatHint);
+                std::string tempOutput = WriteTempFile({}, outputFormat);
+                try {
+                    TrimAudio(tempInput, tempOutput, startMs, endMs);
+                    auto outputBytes = ReadAndDeleteFile(tempOutput);
+                    DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    shared_result->Success(flutter::EncodableValue(outputBytes));
+                } catch (...) {
+                    DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    DeleteFileW(Utf8ToWide(tempOutput).c_str());
+                    throw;
+                }
+            } catch (const std::exception& e) {
+                shared_result->Error("TRIM_ERROR", e.what());
+            }
+        }).detach();
+
+    } else if (method_call.method_name() == "getWaveformBytes") {
+        if (!args) {
+            result->Error("INVALID_ARGUMENTS", "Arguments map is required");
+            return;
+        }
+        auto dataIt = args->find(flutter::EncodableValue("inputData"));
+        auto hintIt = args->find(flutter::EncodableValue("formatHint"));
+        auto samplesIt = args->find(flutter::EncodableValue("numberOfSamples"));
+        if (dataIt == args->end() || hintIt == args->end() || samplesIt == args->end()) {
+            result->Error("INVALID_ARGUMENTS", "inputData, formatHint and numberOfSamples are required");
+            return;
+        }
+        auto inputData = std::get<std::vector<uint8_t>>(dataIt->second);
+        std::string formatHint = std::get<std::string>(hintIt->second);
+        int numberOfSamples = std::get<int32_t>(samplesIt->second);
+
+        auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
+            std::move(result));
+        std::thread([this, inputData = std::move(inputData), formatHint, numberOfSamples, shared_result]() {
+            try {
+                std::string tempInput = WriteTempFile(inputData, formatHint);
+                try {
+                    auto waveform = GetWaveform(tempInput, numberOfSamples);
+                    DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    shared_result->Success(flutter::EncodableValue(waveform));
+                } catch (...) {
+                    DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    throw;
+                }
             } catch (const std::exception& e) {
                 shared_result->Error("WAVEFORM_ERROR", e.what());
             }
@@ -718,6 +904,44 @@ void AudioDecoderPlugin::WriteWavHeader(
     file.write(reinterpret_cast<char*>(&bitsPerSample), 2);
     file.write("data", 4);
     file.write(reinterpret_cast<char*>(&dataSize), 4);
+}
+
+std::string AudioDecoderPlugin::WriteTempFile(
+    const std::vector<uint8_t>& data, const std::string& extension) {
+    wchar_t tempPath[MAX_PATH];
+    GetTempPathW(MAX_PATH, tempPath);
+
+    wchar_t tempFile[MAX_PATH];
+    GetTempFileNameW(tempPath, L"aud", 0, tempFile);
+
+    // Rename with proper extension
+    std::wstring wTempFile(tempFile);
+    std::wstring wNewPath = wTempFile + L"." + Utf8ToWide(extension);
+    MoveFileW(tempFile, wNewPath.c_str());
+
+    // Write data if non-empty
+    if (!data.empty()) {
+        std::ofstream file(wNewPath, std::ios::binary);
+        file.write(reinterpret_cast<const char*>(data.data()), data.size());
+        file.close();
+    }
+
+    return WideToUtf8(wNewPath);
+}
+
+std::vector<uint8_t> AudioDecoderPlugin::ReadAndDeleteFile(const std::string& path) {
+    std::wstring wPath = Utf8ToWide(path);
+    std::ifstream file(wPath, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        throw std::runtime_error("Cannot read output file");
+    }
+    auto size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    std::vector<uint8_t> bytes(size);
+    file.read(reinterpret_cast<char*>(bytes.data()), size);
+    file.close();
+    DeleteFileW(wPath.c_str());
+    return bytes;
 }
 
 }  // namespace audio_decoder

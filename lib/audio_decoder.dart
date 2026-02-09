@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'audio_decoder_platform_interface.dart';
 import 'audio_info.dart';
 
@@ -100,5 +102,70 @@ class AudioDecoder {
       return false;
     }
     return supportedExtensions.any((ext) => lower.endsWith(ext));
+  }
+
+  /// Converts audio bytes to WAV format.
+  ///
+  /// [inputData] is the raw bytes of the source audio file.
+  /// [formatHint] indicates the input format (e.g., 'mp3', 'm4a', 'aac').
+  ///
+  /// Returns the WAV file bytes.
+  /// Throws [AudioConversionException] on failure.
+  static Future<Uint8List> convertToWavBytes(Uint8List inputData, {required String formatHint}) {
+    return AudioDecoderPlatform.instance.convertToWavBytes(inputData, formatHint);
+  }
+
+  /// Converts audio bytes to M4A (AAC) format.
+  ///
+  /// [inputData] is the raw bytes of the source audio file.
+  /// [formatHint] indicates the input format (e.g., 'mp3', 'wav', 'flac').
+  ///
+  /// Returns the M4A file bytes.
+  /// Throws [AudioConversionException] on failure.
+  static Future<Uint8List> convertToM4aBytes(Uint8List inputData, {required String formatHint}) {
+    return AudioDecoderPlatform.instance.convertToM4aBytes(inputData, formatHint);
+  }
+
+  /// Returns metadata about the audio data in [inputData].
+  ///
+  /// [formatHint] indicates the input format (e.g., 'mp3', 'm4a').
+  /// Includes duration, sample rate, channel count, bit rate, and format.
+  /// Throws [AudioConversionException] if the data cannot be read.
+  static Future<AudioInfo> getAudioInfoBytes(Uint8List inputData, {required String formatHint}) {
+    return AudioDecoderPlatform.instance.getAudioInfoBytes(inputData, formatHint);
+  }
+
+  /// Trims audio bytes to the specified time range.
+  ///
+  /// [inputData] is the raw bytes of the source audio file.
+  /// [formatHint] indicates the input format (e.g., 'mp3', 'm4a').
+  /// [start] and [end] define the time range to extract.
+  /// [outputFormat] determines the output encoding ('wav' or 'm4a').
+  ///
+  /// Returns the trimmed audio bytes.
+  /// Throws [AudioConversionException] on failure.
+  static Future<Uint8List> trimAudioBytes(
+    Uint8List inputData, {
+    required String formatHint,
+    required Duration start,
+    required Duration end,
+    String outputFormat = 'wav',
+  }) {
+    return AudioDecoderPlatform.instance.trimAudioBytes(inputData, formatHint, start, end, outputFormat: outputFormat);
+  }
+
+  /// Extracts waveform amplitude data from audio bytes.
+  ///
+  /// [inputData] is the raw bytes of the source audio file.
+  /// [formatHint] indicates the input format (e.g., 'mp3', 'm4a').
+  /// Returns a list of [numberOfSamples] normalized amplitude values (0.0–1.0).
+  ///
+  /// Throws [AudioConversionException] if the data cannot be decoded.
+  static Future<List<double>> getWaveformBytes(
+    Uint8List inputData, {
+    required String formatHint,
+    int numberOfSamples = 100,
+  }) {
+    return AudioDecoderPlatform.instance.getWaveformBytes(inputData, formatHint, numberOfSamples);
   }
 }

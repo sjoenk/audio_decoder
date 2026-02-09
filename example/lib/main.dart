@@ -164,6 +164,138 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
+  Future<Uint8List> _loadAssetBytes(String assetPath) async {
+    final data = await rootBundle.load(assetPath);
+    return data.buffer.asUint8List();
+  }
+
+  Future<void> _convertToWavBytes(String assetPath) async {
+    if (_busy) return;
+
+    final ext = assetPath.split('.').last;
+
+    setState(() {
+      _busy = true;
+      _status = 'Converting ${ext.toUpperCase()} → WAV (bytes API)...';
+    });
+
+    try {
+      final inputBytes = await _loadAssetBytes(assetPath);
+      final wavBytes = await AudioDecoder.convertToWavBytes(
+        inputBytes,
+        formatHint: ext,
+      );
+
+      setState(() {
+        _status =
+            'Bytes API: ${ext.toUpperCase()} → WAV\n\n'
+            'Input: ${assetPath.split('/').last} (${inputBytes.length} bytes)\n'
+            'Output: ${wavBytes.length} bytes\n'
+            'Size: ${(wavBytes.length / 1024).toStringAsFixed(1)} KB';
+      });
+    } on AudioConversionException catch (e) {
+      setState(() => _status = 'Bytes conversion failed: $e');
+    } finally {
+      setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _getAudioInfoBytes(String assetPath) async {
+    if (_busy) return;
+
+    final ext = assetPath.split('.').last;
+
+    setState(() {
+      _busy = true;
+      _status = 'Getting audio info (bytes API)...';
+    });
+
+    try {
+      final inputBytes = await _loadAssetBytes(assetPath);
+      final info = await AudioDecoder.getAudioInfoBytes(
+        inputBytes,
+        formatHint: ext,
+      );
+
+      setState(() {
+        _status =
+            'Bytes API Info: ${assetPath.split('/').last}\n\n'
+            'Duration: ${info.duration.inMilliseconds} ms\n'
+            'Sample rate: ${info.sampleRate} Hz\n'
+            'Channels: ${info.channels}\n'
+            'Bit rate: ${info.bitRate} bps\n'
+            'Format: ${info.format}';
+      });
+    } on AudioConversionException catch (e) {
+      setState(() => _status = 'Bytes info failed: $e');
+    } finally {
+      setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _trimAudioBytes(String assetPath) async {
+    if (_busy) return;
+
+    final ext = assetPath.split('.').last;
+
+    setState(() {
+      _busy = true;
+      _status = 'Trimming audio (0.2s - 0.8s, bytes API)...';
+    });
+
+    try {
+      final inputBytes = await _loadAssetBytes(assetPath);
+      final trimmedBytes = await AudioDecoder.trimAudioBytes(
+        inputBytes,
+        formatHint: ext,
+        start: const Duration(milliseconds: 200),
+        end: const Duration(milliseconds: 800),
+      );
+
+      setState(() {
+        _status =
+            'Bytes API: Trimmed (0.2s-0.8s)\n\n'
+            'Input: ${assetPath.split('/').last} (${inputBytes.length} bytes)\n'
+            'Output: ${trimmedBytes.length} bytes\n'
+            'Size: ${(trimmedBytes.length / 1024).toStringAsFixed(1)} KB';
+      });
+    } on AudioConversionException catch (e) {
+      setState(() => _status = 'Bytes trim failed: $e');
+    } finally {
+      setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _getWaveformBytes(String assetPath) async {
+    if (_busy) return;
+
+    final ext = assetPath.split('.').last;
+
+    setState(() {
+      _busy = true;
+      _waveform = null;
+      _status = 'Extracting waveform (bytes API)...';
+    });
+
+    try {
+      final inputBytes = await _loadAssetBytes(assetPath);
+      final waveform = await AudioDecoder.getWaveformBytes(
+        inputBytes,
+        formatHint: ext,
+        numberOfSamples: 800,
+      );
+
+      setState(() {
+        _waveform = waveform;
+        _status = 'Bytes API: Waveform (${waveform.length} samples)';
+      });
+    } on AudioConversionException catch (e) {
+      setState(() => _status = 'Bytes waveform failed: $e');
+    } finally {
+      setState(() => _busy = false);
+    }
+  }
+
   Future<void> _getWaveform(String assetPath) async {
     if (_busy) return;
 
@@ -274,6 +406,39 @@ class _MyAppState extends State<MyApp> {
                     ? null
                     : () => _trimAudio('assets/test_tone.mp3'),
                 child: const Text('Trim MP3 (0.2s - 0.8s) → WAV'),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Bytes API (in-memory)',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 8),
+              ElevatedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _convertToWavBytes('assets/test_tone.mp3'),
+                child: const Text('Convert MP3 → WAV (bytes)'),
+              ),
+              const SizedBox(height: 8),
+              ElevatedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _getAudioInfoBytes('assets/test_tone.mp3'),
+                child: const Text('Get Audio Info (bytes)'),
+              ),
+              const SizedBox(height: 8),
+              ElevatedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _trimAudioBytes('assets/test_tone.mp3'),
+                child: const Text('Trim MP3 (0.2s - 0.8s, bytes)'),
+              ),
+              const SizedBox(height: 8),
+              ElevatedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _getWaveformBytes('assets/test_tone.mp3'),
+                child: const Text('Get Waveform (bytes)'),
               ),
             ],
           ),

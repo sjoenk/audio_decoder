@@ -48,6 +48,11 @@ class AudioDecoderPlugin : public flutter::Plugin {
   };
   PcmResult DecodeToPcm(const std::string& inputPath,
                          int64_t startMs = -1, int64_t endMs = -1);
+
+  // Temp file helpers for bytes-based API
+  std::string WriteTempFile(const std::vector<uint8_t>& data,
+                            const std::string& extension);
+  std::vector<uint8_t> ReadAndDeleteFile(const std::string& path);
 };
 
 }  // namespace audio_decoder
