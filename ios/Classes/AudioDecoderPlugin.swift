@@ -207,7 +207,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
                 let length = CMBlockBufferGetDataLength(blockBuffer)
                 var data = Data(count: length)
-                data.withUnsafeMutableBytes { ptr in
+                _ = data.withUnsafeMutableBytes { ptr in
                     CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
                                                destination: ptr.baseAddress!)
                 }
@@ -472,7 +472,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                 if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
                     let length = CMBlockBufferGetDataLength(blockBuffer)
                     var data = Data(count: length)
-                    data.withUnsafeMutableBytes { ptr in
+                    _ = data.withUnsafeMutableBytes { ptr in
                         CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
                                                    destination: ptr.baseAddress!)
                     }
@@ -560,7 +560,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
                 let length = CMBlockBufferGetDataLength(blockBuffer)
                 var data = Data(count: length)
-                data.withUnsafeMutableBytes { ptr in
+                _ = data.withUnsafeMutableBytes { ptr in
                     CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
                                                destination: ptr.baseAddress!)
                 }
