@@ -6,7 +6,7 @@ import 'package:audio_decoder/audio_decoder_platform_interface.dart';
 import 'package:audio_decoder/audio_decoder_method_channel.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
-class MockAudioDecoderPlatform with MockPlatformInterfaceMixin implements AudioDecoderPlatform {
+final class MockAudioDecoderPlatform extends AudioDecoderPlatform with MockPlatformInterfaceMixin {
   @override
   Future<String> convertToWav(String inputPath, String outputPath, {int? sampleRate, int? channels, int? bitDepth}) => Future.value(outputPath);
 

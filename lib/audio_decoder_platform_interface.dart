@@ -6,11 +6,12 @@ import 'audio_decoder_method_channel.dart';
 import 'audio_info.dart';
 
 /// The interface that platform-specific implementations of audio_decoder must
-/// implement.
+/// extend.
 ///
-/// Platform implementations should extend this class rather than implement it,
-/// as new methods may be added in the future.
-abstract class AudioDecoderPlatform extends PlatformInterface {
+/// The `base` modifier ensures platform implementations extend this class
+/// rather than implement it, so new methods can be added without breaking
+/// existing implementations.
+abstract base class AudioDecoderPlatform extends PlatformInterface {
   /// Constructs an [AudioDecoderPlatform].
   AudioDecoderPlatform() : super(token: _token);
 

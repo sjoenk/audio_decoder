@@ -1,7 +1,7 @@
 /// Metadata about an audio file or audio data.
 ///
 /// Returned by [AudioDecoder.getAudioInfo] and [AudioDecoder.getAudioInfoBytes].
-class AudioInfo {
+final class AudioInfo {
   /// Total duration of the audio.
   final Duration duration;
 

@@ -16,7 +16,7 @@ const int _wavHeaderSize = 44;
 ///
 /// File-based methods are not supported and throw [UnsupportedError].
 /// Use the bytes-based API instead.
-class AudioDecoderWeb extends AudioDecoderPlatform {
+final class AudioDecoderWeb extends AudioDecoderPlatform {
   /// Creates an [AudioDecoderWeb] instance.
   AudioDecoderWeb();
 
