@@ -1,10 +1,4 @@
-// This is a basic Flutter integration test.
-//
-// Since integration tests run in a full Flutter application, they can interact
-// with the host side of a plugin implementation, unlike Dart unit tests.
-//
-// For more information about Flutter integration tests, please see
-// https://flutter.dev/to/integration-testing
+import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,31 +9,362 @@ import 'package:audio_decoder/audio_decoder.dart';
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
+  // ── Helpers ──────────────────────────────────────────────────────────
+
+  /// Copy a bundled asset to a temp file and return its path.
+  Future<String> copyAssetToTemp(String assetName) async {
+    final data = await rootBundle.load('assets/$assetName');
+    final dir = Directory.systemTemp;
+    final file = File('${dir.path}/$assetName');
+    await file.writeAsBytes(data.buffer.asUint8List());
+    return file.path;
+  }
+
+  /// Build a temp output path with the given [extension] (e.g. 'wav').
+  String tempOutputPath(String name, String extension) =>
+      '${Directory.systemTemp.path}/${name}_output.$extension';
+
+  /// Read a little-endian uint16 from [bytes] at [offset].
+  int readUint16LE(Uint8List bytes, int offset) =>
+      bytes[offset] | (bytes[offset + 1] << 8);
+
+  /// Read a little-endian uint32 from [bytes] at [offset].
+  int readUint32LE(Uint8List bytes, int offset) =>
+      bytes[offset] |
+      (bytes[offset + 1] << 8) |
+      (bytes[offset + 2] << 16) |
+      (bytes[offset + 3] << 24);
+
+  /// Validate the WAV header structure of [bytes] and return a map with
+  /// the parsed header fields.
+  Map<String, int> validateWavHeader(Uint8List bytes) {
+    expect(bytes.length, greaterThan(44),
+        reason: 'WAV file must be larger than 44-byte header');
+    expect(String.fromCharCodes(bytes.sublist(0, 4)), 'RIFF');
+    expect(String.fromCharCodes(bytes.sublist(8, 12)), 'WAVE');
+    expect(String.fromCharCodes(bytes.sublist(12, 16)), 'fmt ');
+
+    final audioFormat = readUint16LE(bytes, 20);
+    expect(audioFormat, 1, reason: 'Audio format should be PCM (1)');
+
+    final channels = readUint16LE(bytes, 22);
+    final sampleRate = readUint32LE(bytes, 24);
+    final bitsPerSample = readUint16LE(bytes, 34);
+
+    expect(channels, greaterThan(0));
+    expect(sampleRate, greaterThan(0));
+    expect(bitsPerSample, greaterThan(0));
+
+    return {
+      'channels': channels,
+      'sampleRate': sampleRate,
+      'bitsPerSample': bitsPerSample,
+    };
+  }
+
+  // ── 1. convertToWav ─────────────────────────────────────────────────
+
+  group('convertToWav', () {
+    testWidgets('MP3 → WAV produces valid WAV file',
+        (WidgetTester tester) async {
+      final inputPath = await copyAssetToTemp('test_tone.mp3');
+      final outputPath = tempOutputPath('mp3_to_wav', 'wav');
+
+      final result = await AudioDecoder.convertToWav(inputPath, outputPath);
+
+      final outputFile = File(result);
+      expect(await outputFile.exists(), isTrue);
+      final bytes = await outputFile.readAsBytes();
+
+      final header = validateWavHeader(bytes);
+      expect(header['sampleRate'], greaterThan(0));
+      expect(header['channels'], anyOf(1, 2));
+      expect(header['bitsPerSample'], anyOf(8, 16, 24, 32));
+
+      // Validate reasonable file size:
+      // expectedSize ≈ duration × sampleRate × channels × bytesPerSample + 44
+      // For a short tone the WAV should be at least a few KB
+      expect(bytes.length, greaterThan(1000));
+    });
+
+    testWidgets('M4A → WAV produces valid WAV file',
+        (WidgetTester tester) async {
+      final inputPath = await copyAssetToTemp('test_tone.m4a');
+      final outputPath = tempOutputPath('m4a_to_wav', 'wav');
+
+      final result = await AudioDecoder.convertToWav(inputPath, outputPath);
+
+      final outputFile = File(result);
+      expect(await outputFile.exists(), isTrue);
+      final bytes = await outputFile.readAsBytes();
+
+      final header = validateWavHeader(bytes);
+      expect(header['sampleRate'], greaterThan(0));
+      expect(header['channels'], anyOf(1, 2));
+      expect(header['bitsPerSample'], anyOf(8, 16, 24, 32));
+      expect(bytes.length, greaterThan(1000));
+    });
+  });
+
+  // ── 2. convertToWav with parameters ─────────────────────────────────
+
+  group('convertToWav with parameters', () {
+    testWidgets('forces sampleRate, channels, and bitDepth',
+        (WidgetTester tester) async {
+      final inputPath = await copyAssetToTemp('test_tone.mp3');
+      final outputPath = tempOutputPath('mp3_params', 'wav');
+
+      const targetSampleRate = 22050;
+      const targetChannels = 1;
+      const targetBitDepth = 16;
+
+      await AudioDecoder.convertToWav(
+        inputPath,
+        outputPath,
+        sampleRate: targetSampleRate,
+        channels: targetChannels,
+        bitDepth: targetBitDepth,
+      );
+
+      final bytes = await File(outputPath).readAsBytes();
+      final header = validateWavHeader(bytes);
+
+      expect(header['sampleRate'], targetSampleRate);
+      expect(header['channels'], targetChannels);
+      expect(header['bitsPerSample'], targetBitDepth);
+    });
+  });
+
+  // ── 3. convertToM4a ─────────────────────────────────────────────────
+
+  group('convertToM4a', () {
+    testWidgets('WAV → M4A produces non-empty output',
+        (WidgetTester tester) async {
+      final inputPath = await copyAssetToTemp('test_tone.wav');
+      final outputPath = tempOutputPath('wav_to_m4a', 'm4a');
+
+      final result = await AudioDecoder.convertToM4a(inputPath, outputPath);
+
+      final outputFile = File(result);
+      expect(await outputFile.exists(), isTrue);
+      final size = await outputFile.length();
+      expect(size, greaterThan(0));
+    });
+  });
+
+  // ── 4. getAudioInfo ─────────────────────────────────────────────────
+
+  group('getAudioInfo', () {
+    for (final asset in ['test_tone.mp3', 'test_tone.m4a', 'test_tone.wav']) {
+      testWidgets('returns realistic metadata for $asset',
+          (WidgetTester tester) async {
+        final inputPath = await copyAssetToTemp(asset);
+        final info = await AudioDecoder.getAudioInfo(inputPath);
+
+        expect(info.duration.inMilliseconds, greaterThan(0),
+            reason: '$asset duration should be > 0');
+        expect(info.sampleRate, greaterThan(0),
+            reason: '$asset sampleRate should be > 0');
+        expect(info.channels, anyOf(1, 2),
+            reason: '$asset channels should be 1 or 2');
+      });
+    }
+  });
+
+  // ── 5. trimAudio ────────────────────────────────────────────────────
+
+  group('trimAudio', () {
+    testWidgets('trimmed output is shorter than original',
+        (WidgetTester tester) async {
+      final inputPath = await copyAssetToTemp('test_tone.mp3');
+
+      // First convert to WAV to have a baseline
+      final fullWavPath = tempOutputPath('trim_full', 'wav');
+      await AudioDecoder.convertToWav(inputPath, fullWavPath);
+      final fullInfo = await AudioDecoder.getAudioInfo(fullWavPath);
+
+      // Trim to 0.2s – 0.8s
+      final trimmedPath = tempOutputPath('trim_partial', 'wav');
+      await AudioDecoder.trimAudio(
+        inputPath,
+        trimmedPath,
+        const Duration(milliseconds: 200),
+        const Duration(milliseconds: 800),
+      );
+
+      final trimmedFile = File(trimmedPath);
+      expect(await trimmedFile.exists(), isTrue);
+
+      final trimmedInfo = await AudioDecoder.getAudioInfo(trimmedPath);
+      expect(trimmedInfo.duration.inMilliseconds,
+          lessThan(fullInfo.duration.inMilliseconds),
+          reason: 'Trimmed duration should be shorter than the original');
+
+      final trimmedSize = await trimmedFile.length();
+      final fullSize = await File(fullWavPath).length();
+      expect(trimmedSize, lessThan(fullSize),
+          reason: 'Trimmed file should be smaller than the full file');
+    });
+  });
+
+  // ── 6. getWaveform ──────────────────────────────────────────────────
+
+  group('getWaveform', () {
+    testWidgets('returns correct number of normalized samples',
+        (WidgetTester tester) async {
+      final inputPath = await copyAssetToTemp('test_tone.mp3');
+
+      const sampleCount = 200;
+      final waveform = await AudioDecoder.getWaveform(
+        inputPath,
+        numberOfSamples: sampleCount,
+      );
+
+      expect(waveform.length, sampleCount);
+      for (final sample in waveform) {
+        expect(sample, greaterThanOrEqualTo(0.0),
+            reason: 'Waveform sample should be >= 0.0');
+        expect(sample, lessThanOrEqualTo(1.0),
+            reason: 'Waveform sample should be <= 1.0');
+      }
+    });
+  });
+
+  // ── 7. Bytes API ────────────────────────────────────────────────────
+
+  group('Bytes API', () {
+    testWidgets('convertToWavBytes returns valid WAV',
+        (WidgetTester tester) async {
+      final mp3Bytes =
+          (await rootBundle.load('assets/test_tone.mp3')).buffer.asUint8List();
+      final wavBytes =
+          await AudioDecoder.convertToWavBytes(mp3Bytes, formatHint: 'mp3');
+
+      validateWavHeader(wavBytes);
+    });
+
+    testWidgets('convertToWavBytes without header returns raw PCM',
+        (WidgetTester tester) async {
+      final mp3Bytes =
+          (await rootBundle.load('assets/test_tone.mp3')).buffer.asUint8List();
+      final wavBytes =
+          await AudioDecoder.convertToWavBytes(mp3Bytes, formatHint: 'mp3');
+      final pcmBytes = await AudioDecoder.convertToWavBytes(mp3Bytes,
+          formatHint: 'mp3', includeHeader: false);
+
+      expect(pcmBytes.length, wavBytes.length - 44);
+      expect(String.fromCharCodes(pcmBytes.sublist(0, 4)), isNot('RIFF'));
+      expect(pcmBytes, wavBytes.sublist(44));
+    });
+
+    testWidgets('convertToWavBytes with parameters reflects in header',
+        (WidgetTester tester) async {
+      final mp3Bytes =
+          (await rootBundle.load('assets/test_tone.mp3')).buffer.asUint8List();
+      final wavBytes = await AudioDecoder.convertToWavBytes(
+        mp3Bytes,
+        formatHint: 'mp3',
+        sampleRate: 22050,
+        channels: 1,
+        bitDepth: 16,
+      );
+
+      final header = validateWavHeader(wavBytes);
+      expect(header['sampleRate'], 22050);
+      expect(header['channels'], 1);
+      expect(header['bitsPerSample'], 16);
+    });
+
+    testWidgets('getAudioInfoBytes returns realistic metadata',
+        (WidgetTester tester) async {
+      final mp3Bytes =
+          (await rootBundle.load('assets/test_tone.mp3')).buffer.asUint8List();
+      final info =
+          await AudioDecoder.getAudioInfoBytes(mp3Bytes, formatHint: 'mp3');
+
+      expect(info.duration.inMilliseconds, greaterThan(0));
+      expect(info.sampleRate, greaterThan(0));
+      expect(info.channels, anyOf(1, 2));
+    });
+
+    testWidgets('trimAudioBytes produces shorter output',
+        (WidgetTester tester) async {
+      final mp3Bytes =
+          (await rootBundle.load('assets/test_tone.mp3')).buffer.asUint8List();
+
+      final fullWavBytes =
+          await AudioDecoder.convertToWavBytes(mp3Bytes, formatHint: 'mp3');
+      final trimmedBytes = await AudioDecoder.trimAudioBytes(
+        mp3Bytes,
+        formatHint: 'mp3',
+        start: const Duration(milliseconds: 200),
+        end: const Duration(milliseconds: 800),
+      );
+
+      expect(trimmedBytes.length, greaterThan(0));
+      expect(trimmedBytes.length, lessThan(fullWavBytes.length),
+          reason: 'Trimmed bytes should be smaller than full conversion');
+    });
+
+    testWidgets('getWaveformBytes returns normalized samples',
+        (WidgetTester tester) async {
+      final mp3Bytes =
+          (await rootBundle.load('assets/test_tone.mp3')).buffer.asUint8List();
+
+      const sampleCount = 150;
+      final waveform = await AudioDecoder.getWaveformBytes(
+        mp3Bytes,
+        formatHint: 'mp3',
+        numberOfSamples: sampleCount,
+      );
+
+      expect(waveform.length, sampleCount);
+      for (final sample in waveform) {
+        expect(sample, greaterThanOrEqualTo(0.0));
+        expect(sample, lessThanOrEqualTo(1.0));
+      }
+    });
+  });
+
+  // ── 8. Error handling ───────────────────────────────────────────────
+
+  group('Error handling', () {
+    testWidgets('non-existent file path throws AudioConversionException',
+        (WidgetTester tester) async {
+      final bogusPath = '${Directory.systemTemp.path}/does_not_exist.mp3';
+      final outputPath = tempOutputPath('error_test', 'wav');
+
+      expect(
+        () => AudioDecoder.convertToWav(bogusPath, outputPath),
+        throwsA(isA<AudioConversionException>()),
+      );
+    });
+
+    testWidgets('invalid/corrupt bytes throw AudioConversionException',
+        (WidgetTester tester) async {
+      final garbage = Uint8List.fromList(List.filled(256, 0xFF));
+
+      expect(
+        () => AudioDecoder.convertToWavBytes(garbage, formatHint: 'mp3'),
+        throwsA(isA<AudioConversionException>()),
+      );
+    });
+
+    testWidgets('getAudioInfo on non-existent file throws',
+        (WidgetTester tester) async {
+      final bogusPath = '${Directory.systemTemp.path}/no_such_file.wav';
+
+      expect(
+        () => AudioDecoder.getAudioInfo(bogusPath),
+        throwsA(isA<AudioConversionException>()),
+      );
+    });
+  });
+
+  // ── Legacy: needsConversion (pure Dart) ─────────────────────────────
+
   testWidgets('needsConversion test', (WidgetTester tester) async {
     expect(AudioDecoder.needsConversion('test.mp3'), true);
     expect(AudioDecoder.needsConversion('test.wav'), false);
-  });
-
-  testWidgets('convertToWavBytes with header returns valid WAV', (WidgetTester tester) async {
-    final mp3Bytes = (await rootBundle.load('assets/test_tone.mp3')).buffer.asUint8List();
-    final wavBytes = await AudioDecoder.convertToWavBytes(mp3Bytes, formatHint: 'mp3');
-
-    // Should start with RIFF header
-    expect(wavBytes.length, greaterThan(44));
-    expect(String.fromCharCodes(wavBytes.sublist(0, 4)), 'RIFF');
-    expect(String.fromCharCodes(wavBytes.sublist(8, 12)), 'WAVE');
-  });
-
-  testWidgets('convertToWavBytes without header returns raw PCM', (WidgetTester tester) async {
-    final mp3Bytes = (await rootBundle.load('assets/test_tone.mp3')).buffer.asUint8List();
-    final wavBytes = await AudioDecoder.convertToWavBytes(mp3Bytes, formatHint: 'mp3');
-    final pcmBytes = await AudioDecoder.convertToWavBytes(mp3Bytes, formatHint: 'mp3', includeHeader: false);
-
-    // PCM should be exactly 44 bytes smaller than the WAV version
-    expect(pcmBytes.length, wavBytes.length - 44);
-    // Should NOT start with RIFF
-    expect(String.fromCharCodes(pcmBytes.sublist(0, 4)), isNot('RIFF'));
-    // PCM data should match the WAV data after the header
-    expect(pcmBytes, wavBytes.sublist(44));
   });
 }
