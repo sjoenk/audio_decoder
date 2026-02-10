@@ -10,7 +10,7 @@ export 'audio_info.dart';
 ///
 /// Provides static methods for converting, trimming, analyzing, and extracting
 /// waveform data from audio files and in-memory audio bytes.
-class AudioDecoder {
+final class AudioDecoder {
   /// Converts an audio file (MP3, M4A, AAC, etc.) to WAV format.
   ///
   /// [inputPath] is the absolute path to the source audio file.

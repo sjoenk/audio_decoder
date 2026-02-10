@@ -4,6 +4,9 @@
 * When `false`, returns only raw interleaved PCM data without the 44-byte RIFF/WAV header.
 * Useful for real-time audio pipelines, direct hardware interfaces, and custom audio processing.
 * Supported on all platforms: Android, iOS, macOS, Windows, Linux, and Web.
+* Add Dart 3 class modifiers to all library classes.
+* `AudioDecoderPlatform` is now `abstract base class` — enforces extension over implementation.
+* `MethodChannelAudioDecoder`, `AudioDecoderWeb`, `AudioDecoder`, `AudioConversionException`, and `AudioInfo` are now `final class` — prevents unintended subclassing.
 
 ## 0.5.0
 

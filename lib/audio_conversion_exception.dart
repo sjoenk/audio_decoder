@@ -2,7 +2,7 @@
 ///
 /// Contains a human-readable [message] and optional [details] from the
 /// native platform.
-class AudioConversionException implements Exception {
+final class AudioConversionException implements Exception {
   /// A human-readable description of the error.
   final String message;
 
