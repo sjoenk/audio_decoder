@@ -3,6 +3,9 @@ import FlutterMacOS
 import AVFoundation
 
 public class AudioDecoderPlugin: NSObject, FlutterPlugin {
+    /// Standard RIFF/WAV header size in bytes (no extra chunks).
+    private static let wavHeaderSize = 44
+
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(
             name: "audio_decoder",
@@ -628,8 +631,10 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                 }
                 try self.performConversion(inputPath: tempInputURL.path, outputPath: tempOutputURL.path, targetSampleRate: sampleRate, targetChannels: channels, targetBitDepth: bitDepth)
                 var outputData = try Data(contentsOf: tempOutputURL)
-                if !includeHeader && outputData.count > 44 {
-                    outputData = outputData.subdata(in: 44..<outputData.count)
+                // Strip the WAV header to return raw PCM.
+                let h = AudioDecoderPlugin.wavHeaderSize
+                if !includeHeader && outputData.count >= h {
+                    outputData = outputData.subdata(in: h..<outputData.count)
                 }
                 DispatchQueue.main.async {
                     result(FlutterStandardTypedData(bytes: outputData))

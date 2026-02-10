@@ -9,6 +9,9 @@ import 'audio_conversion_exception.dart';
 import 'audio_decoder_platform_interface.dart';
 import 'audio_info.dart';
 
+/// Standard RIFF/WAV header size in bytes (no extra chunks).
+const int _wavHeaderSize = 44;
+
 /// Web platform implementation of audio_decoder using the Web Audio API.
 ///
 /// File-based methods are not supported and throw [UnsupportedError].
@@ -84,7 +87,7 @@ class AudioDecoderWeb extends AudioDecoderPlatform {
     final bytesPerSample = bitsPerSample ~/ 8;
     final blockAlign = numChannels * bytesPerSample;
     final dataSize = numFrames * blockAlign;
-    final headerSize = includeHeader ? 44 : 0;
+    final headerSize = includeHeader ? _wavHeaderSize : 0;
     final fileSize = headerSize + dataSize;
 
     final channels = <Float32List>[];

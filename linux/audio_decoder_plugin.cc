@@ -18,6 +18,9 @@
 #include <vector>
 #include <thread>
 
+/// Standard RIFF/WAV header size in bytes (no extra chunks).
+static constexpr size_t kWavHeaderSize = 44;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -747,8 +750,9 @@ static void handle_method_call(AudioDecoderPlugin* self,
                     ConvertToWav(tempInput, tempOutput, targetSampleRate, targetChannels, targetBitDepth);
                     auto outputBytes = ReadAndDeleteFile(tempOutput);
                     std::remove(tempInput.c_str());
-                    if (!includeHeader && outputBytes.size() > 44) {
-                        outputBytes.erase(outputBytes.begin(), outputBytes.begin() + 44);
+                    // Strip the WAV header to return raw PCM.
+                    if (!includeHeader && outputBytes.size() >= kWavHeaderSize) {
+                        outputBytes.erase(outputBytes.begin(), outputBytes.begin() + kWavHeaderSize);
                     }
                     g_autoptr(FlValue) val = fl_value_new_uint8_list(
                         outputBytes.data(), outputBytes.size());
