@@ -1,3 +1,10 @@
+## 0.6.0
+
+* Add `includeHeader` parameter to `convertToWavBytes` (default `true`).
+* When `false`, returns only raw interleaved PCM data without the 44-byte RIFF/WAV header.
+* Useful for real-time audio pipelines, direct hardware interfaces, and custom audio processing.
+* Supported on all platforms: Android, iOS, macOS, Windows, Linux, and Web.
+
 ## 0.5.0
 
 * Add optional `sampleRate`, `channels`, and `bitDepth` parameters to `convertToWav` and `convertToWavBytes`.

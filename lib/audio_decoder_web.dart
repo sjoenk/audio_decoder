@@ -9,6 +9,9 @@ import 'audio_conversion_exception.dart';
 import 'audio_decoder_platform_interface.dart';
 import 'audio_info.dart';
 
+/// Standard RIFF/WAV header size in bytes (no extra chunks).
+const int _wavHeaderSize = 44;
+
 /// Web platform implementation of audio_decoder using the Web Audio API.
 ///
 /// File-based methods are not supported and throw [UnsupportedError].
@@ -72,7 +75,8 @@ class AudioDecoderWeb extends AudioDecoderPlatform {
   }
 
   Uint8List _encodeWav(web.AudioBuffer buffer,
-      {int? startSample, int? endSample, int? targetChannels, int? targetBitDepth}) {
+      {int? startSample, int? endSample, int? targetChannels, int? targetBitDepth,
+       bool includeHeader = true}) {
     final sampleRate = buffer.sampleRate.toInt();
     final srcChannels = buffer.numberOfChannels;
     final numChannels = targetChannels ?? srcChannels;
@@ -83,7 +87,8 @@ class AudioDecoderWeb extends AudioDecoderPlatform {
     final bytesPerSample = bitsPerSample ~/ 8;
     final blockAlign = numChannels * bytesPerSample;
     final dataSize = numFrames * blockAlign;
-    final fileSize = 44 + dataSize;
+    final headerSize = includeHeader ? _wavHeaderSize : 0;
+    final fileSize = headerSize + dataSize;
 
     final channels = <Float32List>[];
     for (var ch = 0; ch < srcChannels; ch++) {
@@ -119,39 +124,41 @@ class AudioDecoderWeb extends AudioDecoderPlatform {
     final data = ByteData(fileSize);
     var pos = 0;
 
-    void writeString(String s) {
-      for (var i = 0; i < s.length; i++) {
-        data.setUint8(pos++, s.codeUnitAt(i));
+    if (includeHeader) {
+      void writeString(String s) {
+        for (var i = 0; i < s.length; i++) {
+          data.setUint8(pos++, s.codeUnitAt(i));
+        }
       }
+
+      // RIFF header
+      writeString('RIFF');
+      data.setUint32(pos, 36 + dataSize, Endian.little);
+      pos += 4;
+      writeString('WAVE');
+
+      // fmt chunk
+      writeString('fmt ');
+      data.setUint32(pos, 16, Endian.little);
+      pos += 4;
+      data.setUint16(pos, 1, Endian.little);
+      pos += 2; // PCM
+      data.setUint16(pos, numChannels, Endian.little);
+      pos += 2;
+      data.setUint32(pos, sampleRate, Endian.little);
+      pos += 4;
+      data.setUint32(pos, sampleRate * blockAlign, Endian.little);
+      pos += 4;
+      data.setUint16(pos, blockAlign, Endian.little);
+      pos += 2;
+      data.setUint16(pos, bitsPerSample, Endian.little);
+      pos += 2;
+
+      // data chunk
+      writeString('data');
+      data.setUint32(pos, dataSize, Endian.little);
+      pos += 4;
     }
-
-    // RIFF header
-    writeString('RIFF');
-    data.setUint32(pos, 36 + dataSize, Endian.little);
-    pos += 4;
-    writeString('WAVE');
-
-    // fmt chunk
-    writeString('fmt ');
-    data.setUint32(pos, 16, Endian.little);
-    pos += 4;
-    data.setUint16(pos, 1, Endian.little);
-    pos += 2; // PCM
-    data.setUint16(pos, numChannels, Endian.little);
-    pos += 2;
-    data.setUint32(pos, sampleRate, Endian.little);
-    pos += 4;
-    data.setUint32(pos, sampleRate * blockAlign, Endian.little);
-    pos += 4;
-    data.setUint16(pos, blockAlign, Endian.little);
-    pos += 2;
-    data.setUint16(pos, bitsPerSample, Endian.little);
-    pos += 2;
-
-    // data chunk
-    writeString('data');
-    data.setUint32(pos, dataSize, Endian.little);
-    pos += 4;
 
     // Interleaved PCM samples
     final maxVal = (1 << (bitsPerSample - 1)) - 1;
@@ -182,13 +189,14 @@ class AudioDecoderWeb extends AudioDecoderPlatform {
 
   @override
   Future<Uint8List> convertToWavBytes(
-      Uint8List inputData, String formatHint, {int? sampleRate, int? channels, int? bitDepth}) async {
+      Uint8List inputData, String formatHint, {int? sampleRate, int? channels, int? bitDepth, bool? includeHeader}) async {
     try {
       var buffer = await _decodeAudioData(inputData);
       if (sampleRate != null && sampleRate != buffer.sampleRate.toInt()) {
         buffer = await _resample(buffer, sampleRate);
       }
-      return _encodeWav(buffer, targetChannels: channels, targetBitDepth: bitDepth);
+      return _encodeWav(buffer, targetChannels: channels, targetBitDepth: bitDepth,
+          includeHeader: includeHeader ?? true);
     } catch (e) {
       if (e is AudioConversionException) rethrow;
       throw AudioConversionException('WAV conversion failed: $e');

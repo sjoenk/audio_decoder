@@ -330,5 +330,34 @@ void main() {
           sampleRate: 22050, channels: 1, bitDepth: 8);
       expect(result, wavBytes);
     });
+
+    test('convertToWavBytes sends includeHeader when false', () async {
+      final pcmBytes = Uint8List.fromList([0x01, 0x02]);
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        MethodCall methodCall,
+      ) async {
+        expect(methodCall.method, 'convertToWavBytes');
+        expect(methodCall.arguments['includeHeader'], false);
+        return pcmBytes;
+      });
+
+      final result = await platform.convertToWavBytes(testInput, 'mp3',
+          includeHeader: false);
+      expect(result, pcmBytes);
+    });
+
+    test('convertToWavBytes omits includeHeader when null (default)', () async {
+      final wavBytes = Uint8List.fromList([0x52, 0x49, 0x46, 0x46]);
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMethodCallHandler(channel, (
+        MethodCall methodCall,
+      ) async {
+        expect(methodCall.method, 'convertToWavBytes');
+        expect(methodCall.arguments.containsKey('includeHeader'), false);
+        return wavBytes;
+      });
+
+      final result = await platform.convertToWavBytes(testInput, 'mp3');
+      expect(result, wavBytes);
+    });
   });
 }

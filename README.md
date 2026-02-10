@@ -33,7 +33,7 @@ Add `audio_decoder` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  audio_decoder: ^0.5.0
+  audio_decoder: ^0.6.0
 ```
 
 Or install via the command line:
@@ -141,6 +141,13 @@ final wavBytes2 = await AudioDecoder.convertToWavBytes(
   bitDepth: 16,
 );
 
+// Get raw PCM bytes (no WAV header)
+final pcmBytes = await AudioDecoder.convertToWavBytes(
+  mp3Bytes,
+  formatHint: 'mp3',
+  includeHeader: false,  // returns raw interleaved PCM samples only
+);
+
 // Get metadata from bytes
 final info = await AudioDecoder.getAudioInfoBytes(
   mp3Bytes,
@@ -188,7 +195,7 @@ The native decoders may support additional formats. You can always call `convert
 ### WAV
 - PCM signed little-endian (16-bit by default, configurable to 8, 24, or 32-bit)
 - Sample rate and channel count default to source values, optionally overridable
-- Standard 44-byte RIFF/WAVE header
+- Standard 44-byte RIFF/WAVE header (can be omitted with `includeHeader: false` in `convertToWavBytes` for raw PCM output)
 
 ### M4A
 - AAC-LC encoding at 128 kbps

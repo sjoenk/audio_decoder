@@ -3,6 +3,9 @@ import UIKit
 import AVFoundation
 
 public class AudioDecoderPlugin: NSObject, FlutterPlugin {
+    /// Standard RIFF/WAV header size in bytes (no extra chunks).
+    private static let wavHeaderSize = 44
+
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(
             name: "audio_decoder",
@@ -88,7 +91,8 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             let sampleRate = args["sampleRate"] as? Int
             let channels = args["channels"] as? Int
             let bitDepth = args["bitDepth"] as? Int
-            convertToWavBytes(inputData: inputData, formatHint: formatHint, sampleRate: sampleRate, channels: channels, bitDepth: bitDepth, result: result)
+            let includeHeader = args["includeHeader"] as? Bool ?? true
+            convertToWavBytes(inputData: inputData, formatHint: formatHint, sampleRate: sampleRate, channels: channels, bitDepth: bitDepth, includeHeader: includeHeader, result: result)
         case "convertToM4aBytes":
             guard let args = call.arguments as? [String: Any],
                   let inputData = args["inputData"] as? FlutterStandardTypedData,
@@ -203,7 +207,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
                 let length = CMBlockBufferGetDataLength(blockBuffer)
                 var data = Data(count: length)
-                data.withUnsafeMutableBytes { ptr in
+                _ = data.withUnsafeMutableBytes { ptr in
                     CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
                                                destination: ptr.baseAddress!)
                 }
@@ -468,7 +472,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                 if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
                     let length = CMBlockBufferGetDataLength(blockBuffer)
                     var data = Data(count: length)
-                    data.withUnsafeMutableBytes { ptr in
+                    _ = data.withUnsafeMutableBytes { ptr in
                         CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
                                                    destination: ptr.baseAddress!)
                     }
@@ -556,7 +560,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
                 let length = CMBlockBufferGetDataLength(blockBuffer)
                 var data = Data(count: length)
-                data.withUnsafeMutableBytes { ptr in
+                _ = data.withUnsafeMutableBytes { ptr in
                     CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
                                                destination: ptr.baseAddress!)
                 }
@@ -622,7 +626,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
 
     // MARK: - Bytes-based methods
 
-    private func convertToWavBytes(inputData: FlutterStandardTypedData, formatHint: String, sampleRate: Int?, channels: Int?, bitDepth: Int?, result: @escaping FlutterResult) {
+    private func convertToWavBytes(inputData: FlutterStandardTypedData, formatHint: String, sampleRate: Int?, channels: Int?, bitDepth: Int?, includeHeader: Bool = true, result: @escaping FlutterResult) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let tempInputURL = try self.writeTempInput(data: inputData, formatHint: formatHint)
@@ -632,7 +636,12 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                     try? FileManager.default.removeItem(at: tempOutputURL)
                 }
                 try self.performConversion(inputPath: tempInputURL.path, outputPath: tempOutputURL.path, targetSampleRate: sampleRate, targetChannels: channels, targetBitDepth: bitDepth)
-                let outputData = try Data(contentsOf: tempOutputURL)
+                var outputData = try Data(contentsOf: tempOutputURL)
+                // Strip the WAV header to return raw PCM.
+                let h = AudioDecoderPlugin.wavHeaderSize
+                if !includeHeader && outputData.count >= h {
+                    outputData = outputData.subdata(in: h..<outputData.count)
+                }
                 DispatchQueue.main.async {
                     result(FlutterStandardTypedData(bytes: outputData))
                 }

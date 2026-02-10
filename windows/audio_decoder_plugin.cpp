@@ -25,6 +25,9 @@
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "mf.lib")
 
+/// Standard RIFF/WAV header size in bytes (no extra chunks).
+static constexpr size_t kWavHeaderSize = 44;
+
 static std::wstring Utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return {};
     int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
@@ -248,9 +251,13 @@ void AudioDecoderPlugin::HandleMethodCall(
         auto bdIt = args->find(flutter::EncodableValue("bitDepth"));
         if (bdIt != args->end()) targetBitDepth = std::get<int32_t>(bdIt->second);
 
+        bool includeHeader = true;
+        auto headerIt = args->find(flutter::EncodableValue("includeHeader"));
+        if (headerIt != args->end()) includeHeader = std::get<bool>(headerIt->second);
+
         auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
             std::move(result));
-        std::thread([this, inputData = std::move(inputData), formatHint, targetSampleRate, targetChannels, targetBitDepth, shared_result]() {
+        std::thread([this, inputData = std::move(inputData), formatHint, targetSampleRate, targetChannels, targetBitDepth, includeHeader, shared_result]() {
             try {
                 std::string tempInput = WriteTempFile(inputData, formatHint);
                 std::string tempOutput = WriteTempFile({}, "wav");
@@ -258,6 +265,10 @@ void AudioDecoderPlugin::HandleMethodCall(
                     ConvertToWav(tempInput, tempOutput, targetSampleRate, targetChannels, targetBitDepth);
                     auto outputBytes = ReadAndDeleteFile(tempOutput);
                     DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    // Strip the WAV header to return raw PCM.
+                    if (!includeHeader && outputBytes.size() >= kWavHeaderSize) {
+                        outputBytes.erase(outputBytes.begin(), outputBytes.begin() + kWavHeaderSize);
+                    }
                     shared_result->Success(flutter::EncodableValue(outputBytes));
                 } catch (...) {
                     DeleteFileW(Utf8ToWide(tempInput).c_str());

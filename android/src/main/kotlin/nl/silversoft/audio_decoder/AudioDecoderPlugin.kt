@@ -24,6 +24,11 @@ import kotlin.math.max
 import kotlin.math.min
 
 class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
+    companion object {
+        /// Standard RIFF/WAV header size in bytes (no extra chunks).
+        private const val WAV_HEADER_SIZE = 44
+    }
+
     private lateinit var channel: MethodChannel
     private lateinit var context: Context
 
@@ -149,13 +154,18 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                 val targetSampleRate = call.argument<Int>("sampleRate")
                 val targetChannels = call.argument<Int>("channels")
                 val targetBitDepth = call.argument<Int>("bitDepth")
+                val includeHeader = call.argument<Boolean>("includeHeader") ?: true
                 thread {
                     try {
                         val tempInput = writeTempInput(inputData, formatHint)
                         val tempOutput = File(context.cacheDir, "audio_decoder_out_${System.nanoTime()}.wav")
                         try {
                             performConversion(tempInput.absolutePath, tempOutput.absolutePath, targetSampleRate, targetChannels, targetBitDepth)
-                            val outputBytes = tempOutput.readBytes()
+                            var outputBytes = tempOutput.readBytes()
+                            // Strip the WAV header to return raw PCM.
+                            if (!includeHeader && outputBytes.size >= WAV_HEADER_SIZE) {
+                                outputBytes = outputBytes.copyOfRange(WAV_HEADER_SIZE, outputBytes.size)
+                            }
                             Handler(Looper.getMainLooper()).post { result.success(outputBytes) }
                         } finally {
                             tempInput.delete()
@@ -922,7 +932,7 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
     ): ByteArray {
         val byteRate = sampleRate * channels * bitsPerSample / 8
         val blockAlign = channels * bitsPerSample / 8
-        val buffer = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+        val buffer = ByteBuffer.allocate(WAV_HEADER_SIZE).order(ByteOrder.LITTLE_ENDIAN)
 
         buffer.put("RIFF".toByteArray(Charsets.US_ASCII))
         buffer.putInt(36 + pcmDataSize)
