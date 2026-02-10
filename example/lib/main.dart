@@ -200,6 +200,43 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
+  Future<void> _convertToRawPcmBytes(String assetPath) async {
+    if (_busy) return;
+
+    final ext = assetPath.split('.').last;
+
+    setState(() {
+      _busy = true;
+      _status = 'Converting ${ext.toUpperCase()} → raw PCM (bytes API)...';
+    });
+
+    try {
+      final inputBytes = await _loadAssetBytes(assetPath);
+      final wavBytes = await AudioDecoder.convertToWavBytes(
+        inputBytes,
+        formatHint: ext,
+      );
+      final pcmBytes = await AudioDecoder.convertToWavBytes(
+        inputBytes,
+        formatHint: ext,
+        includeHeader: false,
+      );
+
+      setState(() {
+        _status =
+            'Bytes API: ${ext.toUpperCase()} → raw PCM\n\n'
+            'Input: ${assetPath.split('/').last} (${inputBytes.length} bytes)\n'
+            'WAV output: ${wavBytes.length} bytes (with header)\n'
+            'PCM output: ${pcmBytes.length} bytes (headerless)\n'
+            'Header stripped: ${wavBytes.length - pcmBytes.length} bytes';
+      });
+    } on AudioConversionException catch (e) {
+      setState(() => _status = 'Raw PCM conversion failed: $e');
+    } finally {
+      setState(() => _busy = false);
+    }
+  }
+
   Future<void> _getAudioInfoBytes(String assetPath) async {
     if (_busy) return;
 
@@ -418,6 +455,13 @@ class _MyAppState extends State<MyApp> {
                     ? null
                     : () => _convertToWavBytes('assets/test_tone.mp3'),
                 child: const Text('Convert MP3 → WAV (bytes)'),
+              ),
+              const SizedBox(height: 8),
+              ElevatedButton(
+                onPressed: _busy
+                    ? null
+                    : () => _convertToRawPcmBytes('assets/test_tone.mp3'),
+                child: const Text('Convert MP3 → raw PCM (bytes)'),
               ),
               const SizedBox(height: 8),
               ElevatedButton(
