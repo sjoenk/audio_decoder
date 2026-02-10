@@ -6,61 +6,36 @@ import 'package:integration_test/integration_test.dart';
 
 import 'package:audio_decoder/audio_decoder.dart';
 
+import 'test_helpers.dart';
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   // ── Helpers ──────────────────────────────────────────────────────────
 
+  late Directory tempDir;
+
+  setUpAll(() {
+    tempDir = Directory.systemTemp.createTempSync('audio_decoder_test_');
+  });
+
+  tearDownAll(() {
+    if (tempDir.existsSync()) {
+      tempDir.deleteSync(recursive: true);
+    }
+  });
+
   /// Copy a bundled asset to a temp file and return its path.
   Future<String> copyAssetToTemp(String assetName) async {
     final data = await rootBundle.load('assets/$assetName');
-    final dir = Directory.systemTemp;
-    final file = File('${dir.path}/$assetName');
+    final file = File('${tempDir.path}/$assetName');
     await file.writeAsBytes(data.buffer.asUint8List());
     return file.path;
   }
 
   /// Build a temp output path with the given [extension] (e.g. 'wav').
   String tempOutputPath(String name, String extension) =>
-      '${Directory.systemTemp.path}/${name}_output.$extension';
-
-  /// Read a little-endian uint16 from [bytes] at [offset].
-  int readUint16LE(Uint8List bytes, int offset) =>
-      bytes[offset] | (bytes[offset + 1] << 8);
-
-  /// Read a little-endian uint32 from [bytes] at [offset].
-  int readUint32LE(Uint8List bytes, int offset) =>
-      bytes[offset] |
-      (bytes[offset + 1] << 8) |
-      (bytes[offset + 2] << 16) |
-      (bytes[offset + 3] << 24);
-
-  /// Validate the WAV header structure of [bytes] and return a map with
-  /// the parsed header fields.
-  Map<String, int> validateWavHeader(Uint8List bytes) {
-    expect(bytes.length, greaterThan(44),
-        reason: 'WAV file must be larger than 44-byte header');
-    expect(String.fromCharCodes(bytes.sublist(0, 4)), 'RIFF');
-    expect(String.fromCharCodes(bytes.sublist(8, 12)), 'WAVE');
-    expect(String.fromCharCodes(bytes.sublist(12, 16)), 'fmt ');
-
-    final audioFormat = readUint16LE(bytes, 20);
-    expect(audioFormat, 1, reason: 'Audio format should be PCM (1)');
-
-    final channels = readUint16LE(bytes, 22);
-    final sampleRate = readUint32LE(bytes, 24);
-    final bitsPerSample = readUint16LE(bytes, 34);
-
-    expect(channels, greaterThan(0));
-    expect(sampleRate, greaterThan(0));
-    expect(bitsPerSample, greaterThan(0));
-
-    return {
-      'channels': channels,
-      'sampleRate': sampleRate,
-      'bitsPerSample': bitsPerSample,
-    };
-  }
+      '${tempDir.path}/${name}_output.$extension';
 
   // ── 1. convertToWav ─────────────────────────────────────────────────
 
@@ -334,8 +309,8 @@ void main() {
       final bogusPath = '${Directory.systemTemp.path}/does_not_exist.mp3';
       final outputPath = tempOutputPath('error_test', 'wav');
 
-      expect(
-        () => AudioDecoder.convertToWav(bogusPath, outputPath),
+      await expectLater(
+        AudioDecoder.convertToWav(bogusPath, outputPath),
         throwsA(isA<AudioConversionException>()),
       );
     });
@@ -344,8 +319,8 @@ void main() {
         (WidgetTester tester) async {
       final garbage = Uint8List.fromList(List.filled(256, 0xFF));
 
-      expect(
-        () => AudioDecoder.convertToWavBytes(garbage, formatHint: 'mp3'),
+      await expectLater(
+        AudioDecoder.convertToWavBytes(garbage, formatHint: 'mp3'),
         throwsA(isA<AudioConversionException>()),
       );
     });
@@ -354,8 +329,8 @@ void main() {
         (WidgetTester tester) async {
       final bogusPath = '${Directory.systemTemp.path}/no_such_file.wav';
 
-      expect(
-        () => AudioDecoder.getAudioInfo(bogusPath),
+      await expectLater(
+        AudioDecoder.getAudioInfo(bogusPath),
         throwsA(isA<AudioConversionException>()),
       );
     });
