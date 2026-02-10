@@ -365,127 +365,140 @@ class _MyAppState extends State<MyApp> {
     return MaterialApp(
       home: Scaffold(
         appBar: AppBar(title: const Text('Audio Decoder Example')),
-        body: SingleChildScrollView(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text(
-                _status,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+        body: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  Text(
+                    _status,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  ),
+                  if (_waveform != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      height: 100,
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade300,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      clipBehavior: Clip.antiAlias,
+                      child: CustomPaint(
+                        size: const Size(double.infinity, 120),
+                        painter: _WaveformPainter(_waveform!),
+                      ),
+                    ),
+                  ],
+                ],
               ),
-              if (_waveform != null) ...[
-                const SizedBox(height: 12),
-                Container(
-                  height: 100,
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade300,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  clipBehavior: Clip.antiAlias,
-                  child: CustomPaint(
-                    size: const Size(double.infinity, 120),
-                    painter: _WaveformPainter(_waveform!),
-                  ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      'Conversion',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _convertToWav('assets/test_tone.mp3'),
+                      child: const Text('Convert MP3 → WAV'),
+                    ),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _convertToWav('assets/test_tone.m4a'),
+                      child: const Text('Convert M4A → WAV'),
+                    ),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _convertToM4a('assets/test_tone.wav'),
+                      child: const Text('Convert WAV → M4A'),
+                    ),
+                    const SizedBox(height: 20),
+                    const Text(
+                      'Info & Analysis',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _getAudioInfo('assets/test_tone.mp3'),
+                      child: const Text('Get Audio Info (MP3)'),
+                    ),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _getWaveform('assets/test_tone.mp3'),
+                      child: const Text('Get Waveform (MP3)'),
+                    ),
+                    const SizedBox(height: 20),
+                    const Text('Trim', style: TextStyle(fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _trimAudio('assets/test_tone.mp3'),
+                      child: const Text('Trim MP3 (0.2s - 0.8s) → WAV'),
+                    ),
+                    const SizedBox(height: 20),
+                    const Text(
+                      'Bytes API (in-memory)',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _convertToWavBytes('assets/test_tone.mp3'),
+                      child: const Text('Convert MP3 → WAV (bytes)'),
+                    ),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _convertToRawPcmBytes('assets/test_tone.mp3'),
+                      child: const Text('Convert MP3 → raw PCM (bytes)'),
+                    ),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _getAudioInfoBytes('assets/test_tone.mp3'),
+                      child: const Text('Get Audio Info (bytes)'),
+                    ),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _trimAudioBytes('assets/test_tone.mp3'),
+                      child: const Text('Trim MP3 (0.2s - 0.8s, bytes)'),
+                    ),
+                    const SizedBox(height: 8),
+                    ElevatedButton(
+                      onPressed: _busy
+                          ? null
+                          : () => _getWaveformBytes('assets/test_tone.mp3'),
+                      child: const Text('Get Waveform (bytes)'),
+                    ),
+                  ],
                 ),
-              ],
-              const SizedBox(height: 24),
-              const Text(
-                'Conversion',
-                style: TextStyle(fontWeight: FontWeight.bold),
               ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _convertToWav('assets/test_tone.mp3'),
-                child: const Text('Convert MP3 → WAV'),
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _convertToWav('assets/test_tone.m4a'),
-                child: const Text('Convert M4A → WAV'),
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _convertToM4a('assets/test_tone.wav'),
-                child: const Text('Convert WAV → M4A'),
-              ),
-              const SizedBox(height: 20),
-              const Text(
-                'Info & Analysis',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _getAudioInfo('assets/test_tone.mp3'),
-                child: const Text('Get Audio Info (MP3)'),
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _getWaveform('assets/test_tone.mp3'),
-                child: const Text('Get Waveform (MP3)'),
-              ),
-              const SizedBox(height: 20),
-              const Text('Trim', style: TextStyle(fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _trimAudio('assets/test_tone.mp3'),
-                child: const Text('Trim MP3 (0.2s - 0.8s) → WAV'),
-              ),
-              const SizedBox(height: 20),
-              const Text(
-                'Bytes API (in-memory)',
-                style: TextStyle(fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _convertToWavBytes('assets/test_tone.mp3'),
-                child: const Text('Convert MP3 → WAV (bytes)'),
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _convertToRawPcmBytes('assets/test_tone.mp3'),
-                child: const Text('Convert MP3 → raw PCM (bytes)'),
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _getAudioInfoBytes('assets/test_tone.mp3'),
-                child: const Text('Get Audio Info (bytes)'),
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _trimAudioBytes('assets/test_tone.mp3'),
-                child: const Text('Trim MP3 (0.2s - 0.8s, bytes)'),
-              ),
-              const SizedBox(height: 8),
-              ElevatedButton(
-                onPressed: _busy
-                    ? null
-                    : () => _getWaveformBytes('assets/test_tone.mp3'),
-                child: const Text('Get Waveform (bytes)'),
-              ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );
