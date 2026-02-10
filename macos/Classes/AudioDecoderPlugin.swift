@@ -88,7 +88,8 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             let sampleRate = args["sampleRate"] as? Int
             let channels = args["channels"] as? Int
             let bitDepth = args["bitDepth"] as? Int
-            convertToWavBytes(inputData: inputData, formatHint: formatHint, sampleRate: sampleRate, channels: channels, bitDepth: bitDepth, result: result)
+            let includeHeader = args["includeHeader"] as? Bool ?? true
+            convertToWavBytes(inputData: inputData, formatHint: formatHint, sampleRate: sampleRate, channels: channels, bitDepth: bitDepth, includeHeader: includeHeader, result: result)
         case "convertToM4aBytes":
             guard let args = call.arguments as? [String: Any],
                   let inputData = args["inputData"] as? FlutterStandardTypedData,
@@ -616,7 +617,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
 
     // MARK: - Bytes-based methods
 
-    private func convertToWavBytes(inputData: FlutterStandardTypedData, formatHint: String, sampleRate: Int?, channels: Int?, bitDepth: Int?, result: @escaping FlutterResult) {
+    private func convertToWavBytes(inputData: FlutterStandardTypedData, formatHint: String, sampleRate: Int?, channels: Int?, bitDepth: Int?, includeHeader: Bool = true, result: @escaping FlutterResult) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let tempInputURL = try self.writeTempInput(data: inputData, formatHint: formatHint)
@@ -626,7 +627,10 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                     try? FileManager.default.removeItem(at: tempOutputURL)
                 }
                 try self.performConversion(inputPath: tempInputURL.path, outputPath: tempOutputURL.path, targetSampleRate: sampleRate, targetChannels: channels, targetBitDepth: bitDepth)
-                let outputData = try Data(contentsOf: tempOutputURL)
+                var outputData = try Data(contentsOf: tempOutputURL)
+                if !includeHeader && outputData.count > 44 {
+                    outputData = outputData.subdata(in: 44..<outputData.count)
+                }
                 DispatchQueue.main.async {
                     result(FlutterStandardTypedData(bytes: outputData))
                 }

@@ -248,9 +248,13 @@ void AudioDecoderPlugin::HandleMethodCall(
         auto bdIt = args->find(flutter::EncodableValue("bitDepth"));
         if (bdIt != args->end()) targetBitDepth = std::get<int32_t>(bdIt->second);
 
+        bool includeHeader = true;
+        auto headerIt = args->find(flutter::EncodableValue("includeHeader"));
+        if (headerIt != args->end()) includeHeader = std::get<bool>(headerIt->second);
+
         auto shared_result = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(
             std::move(result));
-        std::thread([this, inputData = std::move(inputData), formatHint, targetSampleRate, targetChannels, targetBitDepth, shared_result]() {
+        std::thread([this, inputData = std::move(inputData), formatHint, targetSampleRate, targetChannels, targetBitDepth, includeHeader, shared_result]() {
             try {
                 std::string tempInput = WriteTempFile(inputData, formatHint);
                 std::string tempOutput = WriteTempFile({}, "wav");
@@ -258,6 +262,9 @@ void AudioDecoderPlugin::HandleMethodCall(
                     ConvertToWav(tempInput, tempOutput, targetSampleRate, targetChannels, targetBitDepth);
                     auto outputBytes = ReadAndDeleteFile(tempOutput);
                     DeleteFileW(Utf8ToWide(tempInput).c_str());
+                    if (!includeHeader && outputBytes.size() > 44) {
+                        outputBytes.erase(outputBytes.begin(), outputBytes.begin() + 44);
+                    }
                     shared_result->Success(flutter::EncodableValue(outputBytes));
                 } catch (...) {
                     DeleteFileW(Utf8ToWide(tempInput).c_str());

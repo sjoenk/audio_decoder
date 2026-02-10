@@ -32,8 +32,10 @@ class MockAudioDecoderPlatform with MockPlatformInterfaceMixin implements AudioD
   Future<List<double>> getWaveform(String path, int numberOfSamples) => Future.value(List.filled(numberOfSamples, 0.5));
 
   @override
-  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint, {int? sampleRate, int? channels, int? bitDepth}) =>
-      Future.value(Uint8List.fromList([0x52, 0x49, 0x46, 0x46])); // RIFF header stub
+  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint, {int? sampleRate, int? channels, int? bitDepth, bool? includeHeader}) =>
+      Future.value(Uint8List.fromList(
+        (includeHeader == false) ? [0x00, 0x01] : [0x52, 0x49, 0x46, 0x46],
+      ));
 
   @override
   Future<Uint8List> convertToM4aBytes(Uint8List inputData, String formatHint) =>
@@ -254,6 +256,20 @@ void main() {
       final result = await AudioDecoder.convertToWavBytes(input,
           formatHint: 'mp3', sampleRate: 22050, channels: 1, bitDepth: 8);
       expect(result, isNotEmpty);
+    });
+
+    test('convertToWavBytes with includeHeader: false returns raw PCM', () async {
+      final input = Uint8List.fromList([1, 2, 3]);
+      final result = await AudioDecoder.convertToWavBytes(input,
+          formatHint: 'mp3', includeHeader: false);
+      expect(result, isNotEmpty);
+      expect(result[0], isNot(0x52)); // Should not start with 'R' from RIFF
+    });
+
+    test('convertToWavBytes defaults to including header', () async {
+      final input = Uint8List.fromList([1, 2, 3]);
+      final result = await AudioDecoder.convertToWavBytes(input, formatHint: 'mp3');
+      expect(result[0], 0x52); // 'R' from RIFF
     });
   });
 }

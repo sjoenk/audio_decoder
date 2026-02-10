@@ -125,7 +125,7 @@ class MethodChannelAudioDecoder extends AudioDecoderPlatform {
   }
 
   @override
-  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint, {int? sampleRate, int? channels, int? bitDepth}) async {
+  Future<Uint8List> convertToWavBytes(Uint8List inputData, String formatHint, {int? sampleRate, int? channels, int? bitDepth, bool? includeHeader}) async {
     try {
       final args = <String, dynamic>{
         'inputData': inputData,
@@ -134,6 +134,7 @@ class MethodChannelAudioDecoder extends AudioDecoderPlatform {
       if (sampleRate != null) args['sampleRate'] = sampleRate;
       if (channels != null) args['channels'] = channels;
       if (bitDepth != null) args['bitDepth'] = bitDepth;
+      if (includeHeader != null && includeHeader == false) args['includeHeader'] = false;
       final result = await methodChannel.invokeMethod<Uint8List>(
         'convertToWavBytes',
         args,

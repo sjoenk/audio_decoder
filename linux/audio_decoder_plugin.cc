@@ -733,8 +733,13 @@ static void handle_method_call(AudioDecoderPlugin* self,
         if (bdVal && fl_value_get_type(bdVal) == FL_VALUE_TYPE_INT)
             targetBitDepth = static_cast<int>(fl_value_get_int(bdVal));
 
+        bool includeHeader = true;
+        FlValue* headerVal = fl_value_lookup_string(args, "includeHeader");
+        if (headerVal && fl_value_get_type(headerVal) == FL_VALUE_TYPE_BOOL)
+            includeHeader = fl_value_get_bool(headerVal);
+
         g_object_ref(method_call);
-        std::thread([method_call, inputData = std::move(inputData), formatHint, targetSampleRate, targetChannels, targetBitDepth]() {
+        std::thread([method_call, inputData = std::move(inputData), formatHint, targetSampleRate, targetChannels, targetBitDepth, includeHeader]() {
             try {
                 std::string tempInput = WriteTempFile(inputData, formatHint);
                 std::string tempOutput = WriteTempFile({}, "wav");
@@ -742,6 +747,9 @@ static void handle_method_call(AudioDecoderPlugin* self,
                     ConvertToWav(tempInput, tempOutput, targetSampleRate, targetChannels, targetBitDepth);
                     auto outputBytes = ReadAndDeleteFile(tempOutput);
                     std::remove(tempInput.c_str());
+                    if (!includeHeader && outputBytes.size() > 44) {
+                        outputBytes.erase(outputBytes.begin(), outputBytes.begin() + 44);
+                    }
                     g_autoptr(FlValue) val = fl_value_new_uint8_list(
                         outputBytes.data(), outputBytes.size());
                     send_success(method_call, val);

@@ -149,13 +149,17 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                 val targetSampleRate = call.argument<Int>("sampleRate")
                 val targetChannels = call.argument<Int>("channels")
                 val targetBitDepth = call.argument<Int>("bitDepth")
+                val includeHeader = call.argument<Boolean>("includeHeader") ?: true
                 thread {
                     try {
                         val tempInput = writeTempInput(inputData, formatHint)
                         val tempOutput = File(context.cacheDir, "audio_decoder_out_${System.nanoTime()}.wav")
                         try {
                             performConversion(tempInput.absolutePath, tempOutput.absolutePath, targetSampleRate, targetChannels, targetBitDepth)
-                            val outputBytes = tempOutput.readBytes()
+                            var outputBytes = tempOutput.readBytes()
+                            if (!includeHeader && outputBytes.size > 44) {
+                                outputBytes = outputBytes.copyOfRange(44, outputBytes.size)
+                            }
                             Handler(Looper.getMainLooper()).post { result.success(outputBytes) }
                         } finally {
                             tempInput.delete()

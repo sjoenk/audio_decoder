@@ -124,8 +124,10 @@ class AudioDecoder {
   /// [sampleRate] optionally sets the output sample rate (e.g., 44100). Defaults to source sample rate.
   /// [channels] optionally sets the number of output channels (e.g., 1 for mono, 2 for stereo). Defaults to source channels.
   /// [bitDepth] optionally sets the output bit depth (e.g., 16, 24). Defaults to 16.
+  /// [includeHeader] when true (default), returns a complete WAV file with the
+  /// 44-byte RIFF/WAV header. When false, returns only raw interleaved PCM data.
   ///
-  /// Returns the WAV file bytes.
+  /// Returns the WAV file bytes (or raw PCM bytes if [includeHeader] is false).
   /// Throws [AudioConversionException] on failure.
   static Future<Uint8List> convertToWavBytes(
     Uint8List inputData, {
@@ -133,8 +135,11 @@ class AudioDecoder {
     int? sampleRate,
     int? channels,
     int? bitDepth,
+    bool includeHeader = true,
   }) {
-    return AudioDecoderPlatform.instance.convertToWavBytes(inputData, formatHint, sampleRate: sampleRate, channels: channels, bitDepth: bitDepth);
+    return AudioDecoderPlatform.instance.convertToWavBytes(inputData, formatHint,
+        sampleRate: sampleRate, channels: channels, bitDepth: bitDepth,
+        includeHeader: includeHeader);
   }
 
   /// Converts audio bytes to M4A (AAC) format.
