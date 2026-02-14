@@ -50,6 +50,15 @@ class AudioDecoderPlugin : public flutter::Plugin {
       uint32_t bitsPerSample;
   };
 
+  /// Streams decoded PCM to a WAV file on disk. On failure the output file
+  /// is removed before rethrowing.
+  PcmInfo streamPcmToWav(const std::string& inputPath,
+                          const std::string& outputPath,
+                          int64_t startMs = -1, int64_t endMs = -1,
+                          int targetSampleRate = -1,
+                          int targetChannels = -1,
+                          int targetBitDepth = -1);
+
   // Streaming decode: calls onChunk for each decoded PCM buffer
   PcmInfo DecodeToPcmStream(
       const std::string& inputPath,

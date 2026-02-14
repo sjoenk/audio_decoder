@@ -108,49 +108,63 @@ static PcmInfo DecodeToPcmStream(
     }
 
     // Pull samples from appsink
+    auto cleanup = [&]() {
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        gst_object_unref(sink);
+        gst_object_unref(pipeline);
+    };
+
     bool gotCaps = false;
-    while (true) {
-        GstSample* sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
-        if (!sample) break;
+    try {
+        while (true) {
+            GstSample* sample = gst_app_sink_pull_sample(GST_APP_SINK(sink));
+            if (!sample) break;
 
-        if (!gotCaps) {
-            GstCaps* caps = gst_sample_get_caps(sample);
-            if (caps) {
-                GstAudioInfo audioInfo;
-                if (gst_audio_info_from_caps(&audioInfo, caps)) {
-                    info.sampleRate = audioInfo.rate;
-                    info.channels = audioInfo.channels;
-                    info.bitsPerSample = audioInfo.finfo->width;
-                    gotCaps = true;
-                }
-            }
-        }
-
-        GstBuffer* buffer = gst_sample_get_buffer(sample);
-        if (buffer) {
-            // Check end position
-            if (endMs >= 0) {
-                gint64 pts = GST_BUFFER_PTS(buffer);
-                if (GST_CLOCK_TIME_IS_VALID(pts) &&
-                    pts >= static_cast<guint64>(endMs) * GST_MSECOND) {
-                    gst_sample_unref(sample);
-                    break;
+            if (!gotCaps) {
+                GstCaps* caps = gst_sample_get_caps(sample);
+                if (caps) {
+                    GstAudioInfo audioInfo;
+                    if (gst_audio_info_from_caps(&audioInfo, caps)) {
+                        info.sampleRate = audioInfo.rate;
+                        info.channels = audioInfo.channels;
+                        info.bitsPerSample = audioInfo.finfo->width;
+                        gotCaps = true;
+                    }
                 }
             }
 
-            GstMapInfo map;
-            if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
-                onChunk(map.data, map.size);
-                gst_buffer_unmap(buffer, &map);
+            GstBuffer* buffer = gst_sample_get_buffer(sample);
+            if (buffer) {
+                // Check end position
+                if (endMs >= 0) {
+                    gint64 pts = GST_BUFFER_PTS(buffer);
+                    if (GST_CLOCK_TIME_IS_VALID(pts) &&
+                        pts >= static_cast<guint64>(endMs) * GST_MSECOND) {
+                        gst_sample_unref(sample);
+                        break;
+                    }
+                }
+
+                GstMapInfo map;
+                if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                    try {
+                        onChunk(map.data, map.size);
+                    } catch (...) {
+                        gst_buffer_unmap(buffer, &map);
+                        gst_sample_unref(sample);
+                        throw;
+                    }
+                    gst_buffer_unmap(buffer, &map);
+                }
             }
+            gst_sample_unref(sample);
         }
-        gst_sample_unref(sample);
+    } catch (...) {
+        cleanup();
+        throw;
     }
 
-    gst_element_set_state(pipeline, GST_STATE_NULL);
-    gst_object_unref(sink);
-    gst_object_unref(pipeline);
-
+    cleanup();
     return info;
 }
 
@@ -231,43 +245,62 @@ static std::vector<uint8_t> ReadAndDeleteFile(const std::string& path) {
 // Core operations
 // ---------------------------------------------------------------------------
 
-static std::string ConvertToWav(const std::string& inputPath,
-                                const std::string& outputPath,
-                                int targetSampleRate = -1,
-                                int targetChannels = -1,
-                                int targetBitDepth = -1) {
+/// Streams decoded PCM to a WAV file on disk.  Opens the output file, writes
+/// a placeholder header, decodes via DecodeToPcmStream, then seeks back to
+/// finalize the header.  On any failure the output file is removed.
+static PcmInfo streamPcmToWav(
+        const std::string& inputPath,
+        const std::string& outputPath,
+        int64_t startMs = -1, int64_t endMs = -1,
+        int targetSampleRate = -1, int targetChannels = -1,
+        int targetBitDepth = -1) {
     std::fstream file(outputPath,
                       std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
     if (!file.is_open()) {
         throw std::runtime_error("Cannot open output file for writing");
     }
 
-    // Write placeholder WAV header (dataSize = 0)
     WriteWavHeader(file, 0, 0, 0, 0);
 
     int64_t totalPcmBytes = 0;
-    auto info = DecodeToPcmStream(inputPath,
-        [&](const uint8_t* data, size_t size) {
-            file.write(reinterpret_cast<const char*>(data), size);
-            totalPcmBytes += static_cast<int64_t>(size);
-            if (totalPcmBytes > kMaxWavDataSize) {
-                throw std::runtime_error("WAV output exceeds maximum size (~4 GB)");
-            }
-        },
-        -1, -1, targetSampleRate, targetChannels, targetBitDepth);
+    PcmInfo info{};
+    try {
+        info = DecodeToPcmStream(inputPath,
+            [&](const uint8_t* data, size_t size) {
+                file.write(reinterpret_cast<const char*>(data), size);
+                totalPcmBytes += static_cast<int64_t>(size);
+                if (totalPcmBytes > kMaxWavDataSize) {
+                    throw std::runtime_error("WAV output exceeds maximum size (~4 GB)");
+                }
+            },
+            startMs, endMs, targetSampleRate, targetChannels, targetBitDepth);
+    } catch (...) {
+        file.close();
+        std::remove(outputPath.c_str());
+        throw;
+    }
 
     if (totalPcmBytes == 0) {
         file.close();
         std::remove(outputPath.c_str());
-        throw std::runtime_error("No audio data decoded from input file");
+        throw std::runtime_error("No audio data decoded");
     }
 
-    // Seek back and write final header with actual sizes
     file.seekp(0);
     WriteWavHeader(file, static_cast<uint32_t>(totalPcmBytes), info.sampleRate,
                    static_cast<uint16_t>(info.channels),
                    static_cast<uint16_t>(info.bitsPerSample));
     file.close();
+    return info;
+}
+
+static std::string ConvertToWav(const std::string& inputPath,
+                                const std::string& outputPath,
+                                int targetSampleRate = -1,
+                                int targetChannels = -1,
+                                int targetBitDepth = -1) {
+    streamPcmToWav(inputPath, outputPath, -1, -1,
+                   targetSampleRate, targetChannels, targetBitDepth);
     return outputPath;
 }
 
@@ -275,35 +308,7 @@ static std::string ConvertToM4a(const std::string& inputPath,
                                 const std::string& outputPath) {
     // Stream PCM to temp WAV, then encode to M4A via GStreamer pipeline
     std::string tempWav = WriteTempFile({}, "wav");
-    {
-        std::fstream wf(tempWav,
-                        std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
-        if (!wf.is_open()) {
-            std::remove(tempWav.c_str());
-            throw std::runtime_error("Cannot open temp WAV file for writing");
-        }
-
-        WriteWavHeader(wf, 0, 0, 0, 0);
-
-        int64_t totalPcmBytes = 0;
-        auto info = DecodeToPcmStream(inputPath,
-            [&](const uint8_t* data, size_t size) {
-                wf.write(reinterpret_cast<const char*>(data), size);
-                totalPcmBytes += static_cast<int64_t>(size);
-            });
-
-        if (totalPcmBytes == 0) {
-            wf.close();
-            std::remove(tempWav.c_str());
-            throw std::runtime_error("No audio data decoded from input file");
-        }
-
-        wf.seekp(0);
-        WriteWavHeader(wf, static_cast<uint32_t>(totalPcmBytes), info.sampleRate,
-                       static_cast<uint16_t>(info.channels),
-                       static_cast<uint16_t>(info.bitsPerSample));
-        wf.close();
-    }
+    streamPcmToWav(inputPath, tempWav);
 
     gchar* srcUri = g_filename_to_uri(tempWav.c_str(), nullptr, nullptr);
     std::string pipeDesc =
@@ -464,36 +469,7 @@ static std::string TrimAudio(const std::string& inputPath,
     if (ext == "m4a") {
         // Stream trimmed PCM to temp WAV, then encode to M4A
         std::string tempWav = WriteTempFile({}, "wav");
-        {
-            std::fstream wf(tempWav,
-                            std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
-            if (!wf.is_open()) {
-                std::remove(tempWav.c_str());
-                throw std::runtime_error("Cannot open temp WAV file for writing");
-            }
-
-            WriteWavHeader(wf, 0, 0, 0, 0);
-
-            int64_t totalPcmBytes = 0;
-            auto info = DecodeToPcmStream(inputPath,
-                [&](const uint8_t* data, size_t size) {
-                    wf.write(reinterpret_cast<const char*>(data), size);
-                    totalPcmBytes += static_cast<int64_t>(size);
-                },
-                startMs, endMs);
-
-            if (totalPcmBytes == 0) {
-                wf.close();
-                std::remove(tempWav.c_str());
-                throw std::runtime_error("No audio data decoded from trim range");
-            }
-
-            wf.seekp(0);
-            WriteWavHeader(wf, static_cast<uint32_t>(totalPcmBytes), info.sampleRate,
-                           static_cast<uint16_t>(info.channels),
-                           static_cast<uint16_t>(info.bitsPerSample));
-            wf.close();
-        }
+        streamPcmToWav(inputPath, tempWav, startMs, endMs);
 
         gchar* srcUri = g_filename_to_uri(tempWav.c_str(), nullptr, nullptr);
         std::string pipeDesc =
@@ -538,36 +514,7 @@ static std::string TrimAudio(const std::string& inputPath,
             throw std::runtime_error("M4A encoding failed: " + errMsg);
         }
     } else {
-        std::fstream file(outputPath,
-                          std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
-        if (!file.is_open()) {
-            throw std::runtime_error("Cannot open output file for writing");
-        }
-
-        WriteWavHeader(file, 0, 0, 0, 0);
-
-        int64_t totalPcmBytes = 0;
-        auto info = DecodeToPcmStream(inputPath,
-            [&](const uint8_t* data, size_t size) {
-                file.write(reinterpret_cast<const char*>(data), size);
-                totalPcmBytes += static_cast<int64_t>(size);
-                if (totalPcmBytes > kMaxWavDataSize) {
-                    throw std::runtime_error("WAV output exceeds maximum size (~4 GB)");
-                }
-            },
-            startMs, endMs);
-
-        if (totalPcmBytes == 0) {
-            file.close();
-            std::remove(outputPath.c_str());
-            throw std::runtime_error("No audio data decoded from trim range");
-        }
-
-        file.seekp(0);
-        WriteWavHeader(file, static_cast<uint32_t>(totalPcmBytes), info.sampleRate,
-                       static_cast<uint16_t>(info.channels),
-                       static_cast<uint16_t>(info.bitsPerSample));
-        file.close();
+        streamPcmToWav(inputPath, outputPath, startMs, endMs);
     }
 
     return outputPath;

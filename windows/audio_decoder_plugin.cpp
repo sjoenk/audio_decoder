@@ -499,40 +499,52 @@ AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::DecodeToPcmStream(
 
     int64_t endHns = (endMs >= 0) ? endMs * 10000LL : -1;
 
-    while (true) {
-        DWORD flags = 0;
-        LONGLONG timestamp = 0;
-        IMFSample* pSample = nullptr;
-        hr = pReader->ReadSample(
-            (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-            0, nullptr, &flags, &timestamp, &pSample);
+    try {
+        while (true) {
+            DWORD flags = 0;
+            LONGLONG timestamp = 0;
+            IMFSample* pSample = nullptr;
+            hr = pReader->ReadSample(
+                (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+                0, nullptr, &flags, &timestamp, &pSample);
 
-        if (FAILED(hr)) break;
-        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
-            if (pSample) pSample->Release();
-            break;
-        }
-
-        if (endHns >= 0 && timestamp > endHns) {
-            if (pSample) pSample->Release();
-            break;
-        }
-
-        if (pSample) {
-            IMFMediaBuffer* pBuffer = nullptr;
-            pSample->ConvertToContiguousBuffer(&pBuffer);
-            if (pBuffer) {
-                BYTE* pAudioData = nullptr;
-                DWORD cbBuffer = 0;
-                hr = pBuffer->Lock(&pAudioData, nullptr, &cbBuffer);
-                if (SUCCEEDED(hr)) {
-                    onChunk(pAudioData, cbBuffer);
-                    pBuffer->Unlock();
-                }
-                pBuffer->Release();
+            if (FAILED(hr)) break;
+            if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
+                if (pSample) pSample->Release();
+                break;
             }
-            pSample->Release();
+
+            if (endHns >= 0 && timestamp > endHns) {
+                if (pSample) pSample->Release();
+                break;
+            }
+
+            if (pSample) {
+                IMFMediaBuffer* pBuffer = nullptr;
+                pSample->ConvertToContiguousBuffer(&pBuffer);
+                if (pBuffer) {
+                    BYTE* pAudioData = nullptr;
+                    DWORD cbBuffer = 0;
+                    hr = pBuffer->Lock(&pAudioData, nullptr, &cbBuffer);
+                    if (SUCCEEDED(hr)) {
+                        try {
+                            onChunk(pAudioData, cbBuffer);
+                        } catch (...) {
+                            pBuffer->Unlock();
+                            pBuffer->Release();
+                            pSample->Release();
+                            throw;
+                        }
+                        pBuffer->Unlock();
+                    }
+                    pBuffer->Release();
+                }
+                pSample->Release();
+            }
         }
+    } catch (...) {
+        pReader->Release();
+        throw;
     }
     pReader->Release();
 
@@ -559,8 +571,9 @@ AudioDecoderPlugin::PcmResult AudioDecoderPlugin::DecodeToPcm(
     return result;
 }
 
-std::string AudioDecoderPlugin::ConvertToWav(
+AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::streamPcmToWav(
     const std::string& inputPath, const std::string& outputPath,
+    int64_t startMs, int64_t endMs,
     int targetSampleRate, int targetChannels, int targetBitDepth) {
 
     std::wstring wOutputPath = Utf8ToWide(outputPath);
@@ -570,33 +583,46 @@ std::string AudioDecoderPlugin::ConvertToWav(
         throw std::runtime_error("Cannot open output file for writing");
     }
 
-    // Write placeholder WAV header (dataSize = 0)
     WriteWavHeader(file, 0, 0, 0, 0);
 
     int64_t totalPcmBytes = 0;
-    auto info = DecodeToPcmStream(inputPath,
-        [&](const uint8_t* data, size_t size) {
-            file.write(reinterpret_cast<const char*>(data), size);
-            totalPcmBytes += static_cast<int64_t>(size);
-            if (totalPcmBytes > kMaxWavDataSize) {
-                throw std::runtime_error("WAV output exceeds maximum size (~4 GB)");
-            }
-        },
-        -1, -1, targetSampleRate, targetChannels, targetBitDepth);
+    PcmInfo info{};
+    try {
+        info = DecodeToPcmStream(inputPath,
+            [&](const uint8_t* data, size_t size) {
+                file.write(reinterpret_cast<const char*>(data), size);
+                totalPcmBytes += static_cast<int64_t>(size);
+                if (totalPcmBytes > kMaxWavDataSize) {
+                    throw std::runtime_error("WAV output exceeds maximum size (~4 GB)");
+                }
+            },
+            startMs, endMs, targetSampleRate, targetChannels, targetBitDepth);
+    } catch (...) {
+        file.close();
+        DeleteFileW(wOutputPath.c_str());
+        throw;
+    }
 
     if (totalPcmBytes == 0) {
         file.close();
         DeleteFileW(wOutputPath.c_str());
-        throw std::runtime_error("No audio data decoded from input file");
+        throw std::runtime_error("No audio data decoded");
     }
 
-    // Seek back and write final header with actual sizes
     file.seekp(0);
     WriteWavHeader(file, static_cast<uint32_t>(totalPcmBytes), info.sampleRate,
                    static_cast<uint16_t>(info.channels),
                    static_cast<uint16_t>(info.bitsPerSample));
     file.close();
+    return info;
+}
 
+std::string AudioDecoderPlugin::ConvertToWav(
+    const std::string& inputPath, const std::string& outputPath,
+    int targetSampleRate, int targetChannels, int targetBitDepth) {
+
+    streamPcmToWav(inputPath, outputPath, -1, -1,
+                   targetSampleRate, targetChannels, targetBitDepth);
     return outputPath;
 }
 
@@ -814,6 +840,9 @@ std::string AudioDecoderPlugin::TrimAudio(
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
     if (ext == "m4a") {
+        // M4A trimming uses DecodeToPcm (full buffering) because
+        // IMFSinkWriter requires sample-by-sample feeding from PCM data
+        // which cannot easily be streamed from DecodeToPcmStream.
         MFSession session;
         if (!session.IsInitialized()) {
             throw std::runtime_error("Failed to initialize Media Foundation");
@@ -892,37 +921,7 @@ std::string AudioDecoderPlugin::TrimAudio(
         pWriter->Finalize();
         pWriter->Release();
     } else {
-        std::wstring wOutputPath = Utf8ToWide(outputPath);
-        std::fstream file(wOutputPath,
-                          std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
-        if (!file.is_open()) {
-            throw std::runtime_error("Cannot open output file for writing");
-        }
-
-        WriteWavHeader(file, 0, 0, 0, 0);
-
-        int64_t totalPcmBytes = 0;
-        auto wavInfo = DecodeToPcmStream(inputPath,
-            [&](const uint8_t* data, size_t size) {
-                file.write(reinterpret_cast<const char*>(data), size);
-                totalPcmBytes += static_cast<int64_t>(size);
-                if (totalPcmBytes > kMaxWavDataSize) {
-                    throw std::runtime_error("WAV output exceeds maximum size (~4 GB)");
-                }
-            },
-            startMs, endMs);
-
-        if (totalPcmBytes == 0) {
-            file.close();
-            DeleteFileW(wOutputPath.c_str());
-            throw std::runtime_error("No audio data decoded from trim range");
-        }
-
-        file.seekp(0);
-        WriteWavHeader(file, static_cast<uint32_t>(totalPcmBytes), wavInfo.sampleRate,
-                       static_cast<uint16_t>(wavInfo.channels),
-                       static_cast<uint16_t>(wavInfo.bitsPerSample));
-        file.close();
+        streamPcmToWav(inputPath, outputPath, startMs, endMs);
     }
 
     return outputPath;
