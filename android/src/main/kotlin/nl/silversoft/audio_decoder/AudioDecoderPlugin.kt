@@ -358,6 +358,7 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         var outputDone = false
         val timeoutUs = 10_000L
         val outputFile = File(outputPath)
+        outputFile.delete()
 
         try {
             RandomAccessFile(outputFile, "rw").use { raf ->
