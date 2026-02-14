@@ -248,7 +248,7 @@ static std::vector<uint8_t> ReadAndDeleteFile(const std::string& path) {
 /// Streams decoded PCM to a WAV file on disk.  Opens the output file, writes
 /// a placeholder header, decodes via DecodeToPcmStream, then seeks back to
 /// finalize the header.  On any failure the output file is removed.
-static PcmInfo streamPcmToWav(
+static PcmInfo StreamPcmToWav(
         const std::string& inputPath,
         const std::string& outputPath,
         int64_t startMs = -1, int64_t endMs = -1,
@@ -268,6 +268,9 @@ static PcmInfo streamPcmToWav(
         info = DecodeToPcmStream(inputPath,
             [&](const uint8_t* data, size_t size) {
                 file.write(reinterpret_cast<const char*>(data), size);
+                if (!file) {
+                    throw std::runtime_error("Failed to write PCM data to WAV file");
+                }
                 totalPcmBytes += static_cast<int64_t>(size);
                 if (totalPcmBytes > kMaxWavDataSize) {
                     throw std::runtime_error("WAV output exceeds maximum size (~4 GB)");
@@ -287,6 +290,11 @@ static PcmInfo streamPcmToWav(
     }
 
     file.seekp(0);
+    if (!file) {
+        file.close();
+        std::remove(outputPath.c_str());
+        throw std::runtime_error("Failed to seek to beginning of WAV file");
+    }
     WriteWavHeader(file, static_cast<uint32_t>(totalPcmBytes), info.sampleRate,
                    static_cast<uint16_t>(info.channels),
                    static_cast<uint16_t>(info.bitsPerSample));
@@ -299,7 +307,7 @@ static std::string ConvertToWav(const std::string& inputPath,
                                 int targetSampleRate = -1,
                                 int targetChannels = -1,
                                 int targetBitDepth = -1) {
-    streamPcmToWav(inputPath, outputPath, -1, -1,
+    StreamPcmToWav(inputPath, outputPath, -1, -1,
                    targetSampleRate, targetChannels, targetBitDepth);
     return outputPath;
 }
@@ -308,7 +316,7 @@ static std::string ConvertToM4a(const std::string& inputPath,
                                 const std::string& outputPath) {
     // Stream PCM to temp WAV, then encode to M4A via GStreamer pipeline
     std::string tempWav = WriteTempFile({}, "wav");
-    streamPcmToWav(inputPath, tempWav);
+    StreamPcmToWav(inputPath, tempWav);
 
     gchar* srcUri = g_filename_to_uri(tempWav.c_str(), nullptr, nullptr);
     std::string pipeDesc =
@@ -469,7 +477,7 @@ static std::string TrimAudio(const std::string& inputPath,
     if (ext == "m4a") {
         // Stream trimmed PCM to temp WAV, then encode to M4A
         std::string tempWav = WriteTempFile({}, "wav");
-        streamPcmToWav(inputPath, tempWav, startMs, endMs);
+        StreamPcmToWav(inputPath, tempWav, startMs, endMs);
 
         gchar* srcUri = g_filename_to_uri(tempWav.c_str(), nullptr, nullptr);
         std::string pipeDesc =
@@ -514,7 +522,7 @@ static std::string TrimAudio(const std::string& inputPath,
             throw std::runtime_error("M4A encoding failed: " + errMsg);
         }
     } else {
-        streamPcmToWav(inputPath, outputPath, startMs, endMs);
+        StreamPcmToWav(inputPath, outputPath, startMs, endMs);
     }
 
     return outputPath;

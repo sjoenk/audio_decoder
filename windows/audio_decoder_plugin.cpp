@@ -571,7 +571,7 @@ AudioDecoderPlugin::PcmResult AudioDecoderPlugin::DecodeToPcm(
     return result;
 }
 
-AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::streamPcmToWav(
+AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::StreamPcmToWav(
     const std::string& inputPath, const std::string& outputPath,
     int64_t startMs, int64_t endMs,
     int targetSampleRate, int targetChannels, int targetBitDepth) {
@@ -591,6 +591,9 @@ AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::streamPcmToWav(
         info = DecodeToPcmStream(inputPath,
             [&](const uint8_t* data, size_t size) {
                 file.write(reinterpret_cast<const char*>(data), size);
+                if (!file) {
+                    throw std::runtime_error("Failed to write PCM data to WAV file");
+                }
                 totalPcmBytes += static_cast<int64_t>(size);
                 if (totalPcmBytes > kMaxWavDataSize) {
                     throw std::runtime_error("WAV output exceeds maximum size (~4 GB)");
@@ -610,6 +613,11 @@ AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::streamPcmToWav(
     }
 
     file.seekp(0);
+    if (!file) {
+        file.close();
+        DeleteFileW(wOutputPath.c_str());
+        throw std::runtime_error("Failed to seek to beginning of WAV file");
+    }
     WriteWavHeader(file, static_cast<uint32_t>(totalPcmBytes), info.sampleRate,
                    static_cast<uint16_t>(info.channels),
                    static_cast<uint16_t>(info.bitsPerSample));
@@ -621,7 +629,7 @@ std::string AudioDecoderPlugin::ConvertToWav(
     const std::string& inputPath, const std::string& outputPath,
     int targetSampleRate, int targetChannels, int targetBitDepth) {
 
-    streamPcmToWav(inputPath, outputPath, -1, -1,
+    StreamPcmToWav(inputPath, outputPath, -1, -1,
                    targetSampleRate, targetChannels, targetBitDepth);
     return outputPath;
 }
@@ -921,7 +929,7 @@ std::string AudioDecoderPlugin::TrimAudio(
         pWriter->Finalize();
         pWriter->Release();
     } else {
-        streamPcmToWav(inputPath, outputPath, startMs, endMs);
+        StreamPcmToWav(inputPath, outputPath, startMs, endMs);
     }
 
     return outputPath;
