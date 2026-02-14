@@ -1,5 +1,10 @@
+#if os(iOS)
+import Flutter
+import UIKit
+#elseif os(macOS)
 import Cocoa
 import FlutterMacOS
+#endif
 import AVFoundation
 
 public class AudioDecoderPlugin: NSObject, FlutterPlugin {
@@ -9,9 +14,14 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
     private static let maxWavDataSize: Int64 = 0xFFFF_FFFF - 36
 
     public static func register(with registrar: FlutterPluginRegistrar) {
+        #if os(iOS)
+        let messenger = registrar.messenger()
+        #elseif os(macOS)
+        let messenger = registrar.messenger
+        #endif
         let channel = FlutterMethodChannel(
             name: "audio_decoder",
-            binaryMessenger: registrar.messenger
+            binaryMessenger: messenger
         )
         let instance = AudioDecoderPlugin()
         registrar.addMethodCallDelegate(instance, channel: channel)
@@ -399,6 +409,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
         let timeRange = CMTimeRange(start: startTime, end: endTime)
 
         if outputExt == "m4a" {
+            // Use AVAssetExportSession for M4A output
             guard let exportSession = AVAssetExportSession(
                 asset: asset,
                 presetName: AVAssetExportPresetAppleM4A
@@ -523,6 +534,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                           userInfo: [NSLocalizedDescriptionKey: "AVAssetReader failed to start"])
         }
 
+        // Read all PCM samples
         var allSamples = [Int16]()
         while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
             if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
@@ -543,6 +555,7 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             return Array(repeating: 0.0, count: numberOfSamples)
         }
 
+        // Compute RMS per window
         let samplesPerWindow = max(1, allSamples.count / numberOfSamples)
         var waveform = [Double]()
         var maxRms = 0.0
@@ -562,10 +575,12 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             if rms > maxRms { maxRms = rms }
         }
 
+        // Normalize to 0.0-1.0
         if maxRms > 0 {
             waveform = waveform.map { $0 / maxRms }
         }
 
+        // Pad if needed
         while waveform.count < numberOfSamples {
             waveform.append(0.0)
         }

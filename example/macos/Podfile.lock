@@ -14,7 +14,7 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral
 
 SPEC CHECKSUMS:
-  audio_decoder: 6c511123c2f9986764a05673f7c51ad8504dfc7e
+  audio_decoder: 9e92d27879afedb63877a48af31eaed2d9389b52
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
 
 PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
