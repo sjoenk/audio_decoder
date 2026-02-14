@@ -44,3 +44,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Large benchmark assets (provide your own, see integration_test/benchmark_test.dart)
+assets/test_large.*

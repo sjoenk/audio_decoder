@@ -110,6 +110,94 @@ void main() {
     });
   });
 
+  // ── 2b. Streaming path (no resampling) ────────────────────────────
+  // When only channels and/or bitDepth are specified (no sampleRate),
+  // the streaming path writes PCM chunks directly to disk via
+  // RandomAccessFile instead of buffering the full output in memory.
+
+  group('convertToWav streaming path', () {
+    testWidgets('channel conversion only (stereo → mono) uses streaming path',
+        (WidgetTester tester) async {
+      final inputPath = await copyAssetToTemp('test_tone.mp3');
+      final outputPath = tempOutputPath('stream_mono', 'wav');
+
+      await AudioDecoder.convertToWav(
+        inputPath,
+        outputPath,
+        channels: 1,
+      );
+
+      final bytes = await File(outputPath).readAsBytes();
+      final header = validateWavHeader(bytes);
+
+      expect(header['channels'], 1);
+      // sampleRate should be preserved from source (no resampling)
+      final sourceInfo = await AudioDecoder.getAudioInfo(inputPath);
+      expect(header['sampleRate'], sourceInfo.sampleRate);
+    });
+
+    testWidgets('bit depth conversion only (16 → 24 bit) uses streaming path',
+        (WidgetTester tester) async {
+      final inputPath = await copyAssetToTemp('test_tone.mp3');
+      final outputPath = tempOutputPath('stream_24bit', 'wav');
+
+      await AudioDecoder.convertToWav(
+        inputPath,
+        outputPath,
+        bitDepth: 24,
+      );
+
+      final bytes = await File(outputPath).readAsBytes();
+      final header = validateWavHeader(bytes);
+
+      expect(header['bitsPerSample'], 24);
+      final sourceInfo = await AudioDecoder.getAudioInfo(inputPath);
+      expect(header['sampleRate'], sourceInfo.sampleRate);
+    });
+
+    testWidgets('channel + bit depth conversion without resampling',
+        (WidgetTester tester) async {
+      final inputPath = await copyAssetToTemp('test_tone.mp3');
+      final outputPath = tempOutputPath('stream_mono_24bit', 'wav');
+
+      await AudioDecoder.convertToWav(
+        inputPath,
+        outputPath,
+        channels: 1,
+        bitDepth: 24,
+      );
+
+      final bytes = await File(outputPath).readAsBytes();
+      final header = validateWavHeader(bytes);
+
+      expect(header['channels'], 1);
+      expect(header['bitsPerSample'], 24);
+      final sourceInfo = await AudioDecoder.getAudioInfo(inputPath);
+      expect(header['sampleRate'], sourceInfo.sampleRate);
+    });
+
+    testWidgets('WAV header data size matches actual PCM payload',
+        (WidgetTester tester) async {
+      final inputPath = await copyAssetToTemp('test_tone.mp3');
+      final outputPath = tempOutputPath('stream_header_check', 'wav');
+
+      await AudioDecoder.convertToWav(inputPath, outputPath);
+
+      final bytes = await File(outputPath).readAsBytes();
+      validateWavHeader(bytes);
+
+      // The data chunk size at offset 40 should equal totalFileSize - 44
+      final dataChunkSize = readUint32LE(bytes, 40);
+      expect(dataChunkSize, bytes.length - 44,
+          reason: 'WAV data chunk size should match actual PCM payload');
+
+      // The RIFF chunk size at offset 4 should equal totalFileSize - 8
+      final riffChunkSize = readUint32LE(bytes, 4);
+      expect(riffChunkSize, bytes.length - 8,
+          reason: 'RIFF chunk size should equal file size minus 8');
+    });
+  });
+
   // ── 3. convertToM4a ─────────────────────────────────────────────────
 
   group('convertToM4a', () {

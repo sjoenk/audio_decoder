@@ -57,6 +57,10 @@ flutter:
     - assets/test_tone.m4a
     - assets/test_tone.mp3
     - assets/test_tone.wav
+    # Uncomment below to run benchmark_test.dart (see that file for setup):
+    # - assets/test_large.m4a
+    # - assets/test_large.mp3
+    # - assets/test_large.wav
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images
