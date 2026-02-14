@@ -20,6 +20,7 @@ final class AudioDecoder {
   /// [bitDepth] optionally sets the output bit depth (e.g., 16, 24). Defaults to 16.
   ///
   /// Returns the output path on success.
+  /// Throws [ArgumentError] if [sampleRate], [channels], or [bitDepth] is invalid.
   /// Throws [AudioConversionException] on failure.
   static Future<String> convertToWav(
     String inputPath,
@@ -143,6 +144,7 @@ final class AudioDecoder {
   /// 44-byte RIFF/WAV header. When false, returns only raw interleaved PCM data.
   ///
   /// Returns the WAV file bytes (or raw PCM bytes if [includeHeader] is false).
+  /// Throws [ArgumentError] if [sampleRate], [channels], or [bitDepth] is invalid.
   /// Throws [AudioConversionException] on failure.
   static Future<Uint8List> convertToWavBytes(
     Uint8List inputData, {
