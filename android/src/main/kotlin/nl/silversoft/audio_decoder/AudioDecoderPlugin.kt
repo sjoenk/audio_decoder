@@ -28,6 +28,11 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
     companion object {
         /// Standard RIFF/WAV header size in bytes (no extra chunks).
         private const val WAV_HEADER_SIZE = 44
+
+        /// Maximum PCM data size for a standard WAV file.
+        /// The RIFF chunk header stores total file size minus 8 as a uint32,
+        /// so the data payload can be at most 2^32 - 1 - 36 bytes (~4 GB).
+        private const val MAX_WAV_DATA_SIZE = 0xFFFFFFFFL - 36L
     }
 
     private lateinit var channel: MethodChannel
@@ -359,9 +364,7 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                 // Write placeholder WAV header (will be updated after decoding)
                 raf.write(buildWavHeader(0, track.sampleRate, channelCount, bitsPerSample))
 
-                // Int limits total size to ~2 GB, which matches the WAV format's
-                // 32-bit size fields. Files exceeding this would require RF64.
-                var totalPcmBytes = 0
+                var totalPcmBytes = 0L
 
                 while (!outputDone) {
                     if (!inputDone) {
@@ -402,14 +405,20 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
 
                             raf.write(chunk)
                             totalPcmBytes += chunk.size
+                            if (totalPcmBytes > MAX_WAV_DATA_SIZE) {
+                                throw Exception("WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments.")
+                            }
                         }
                         codec.releaseOutputBuffer(outputBufferIndex, false)
                     }
                 }
 
-                // Seek back and write the final WAV header with the actual data size
+                // Seek back and write the final WAV header with the actual data size.
+                // The toInt() cast is safe: totalPcmBytes is validated against
+                // MAX_WAV_DATA_SIZE, so the bit pattern is a valid uint32 value
+                // that ByteBuffer.putInt writes correctly in little-endian.
                 raf.seek(0)
-                raf.write(buildWavHeader(totalPcmBytes, track.sampleRate, channelCount, bitsPerSample))
+                raf.write(buildWavHeader(totalPcmBytes.toInt(), track.sampleRate, channelCount, bitsPerSample))
             }
         } catch (e: Exception) {
             outputFile.delete()
