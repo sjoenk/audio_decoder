@@ -297,147 +297,140 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
 
     // region Convert to WAV
 
-    private fun performConversion(inputPath: String, outputPath: String, targetSampleRate: Int? = null, targetChannels: Int? = null, targetBitDepth: Int? = null) {
+    private data class AudioTrackInfo(
+        val extractor: MediaExtractor,
+        val format: MediaFormat,
+        val mime: String,
+        val sampleRate: Int,
+        val channelCount: Int
+    )
+
+    private fun extractAudioTrack(inputPath: String): AudioTrackInfo {
         val extractor = MediaExtractor()
         extractor.setDataSource(inputPath)
 
-        var audioTrackIndex = -1
-        var format: MediaFormat? = null
         for (i in 0 until extractor.trackCount) {
             val trackFormat = extractor.getTrackFormat(i)
             val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: ""
             if (mime.startsWith("audio/")) {
-                audioTrackIndex = i
-                format = trackFormat
-                break
+                extractor.selectTrack(i)
+                return AudioTrackInfo(
+                    extractor = extractor,
+                    format = trackFormat,
+                    mime = trackFormat.getString(MediaFormat.KEY_MIME)!!,
+                    sampleRate = trackFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE),
+                    channelCount = trackFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                )
             }
         }
-        if (audioTrackIndex == -1 || format == null) {
-            extractor.release()
-            throw Exception("No audio track found in $inputPath")
-        }
 
-        extractor.selectTrack(audioTrackIndex)
+        extractor.release()
+        throw Exception("No audio track found in $inputPath")
+    }
 
-        val mime = format.getString(MediaFormat.KEY_MIME)!!
-        val srcSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val srcChannelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+    private fun performConversion(inputPath: String, outputPath: String, targetSampleRate: Int? = null, targetChannels: Int? = null, targetBitDepth: Int? = null) {
+        val track = extractAudioTrack(inputPath)
         val bitsPerSample = targetBitDepth ?: 16
 
         // Resampling requires the full PCM buffer upfront for interpolation,
         // so fall back to the buffered path when a sample rate change is requested.
-        val needsResampling = targetSampleRate != null && targetSampleRate != srcSampleRate
+        val needsResampling = targetSampleRate != null && targetSampleRate != track.sampleRate
         if (needsResampling) {
-            extractor.release()
+            track.extractor.release()
             performConversionBuffered(inputPath, outputPath, targetSampleRate, targetChannels, targetBitDepth)
             return
         }
 
-        val codec = MediaCodec.createDecoderByType(mime)
-        codec.configure(format, null, null, 0)
+        val codec = MediaCodec.createDecoderByType(track.mime)
+        codec.configure(track.format, null, null, 0)
         codec.start()
 
-        val channelCount = targetChannels ?: srcChannelCount
-        val needsChannelConversion = targetChannels != null && targetChannels != srcChannelCount
+        val channelCount = targetChannels ?: track.channelCount
+        val needsChannelConversion = targetChannels != null && targetChannels != track.channelCount
         val needsBitDepthConversion = bitsPerSample != 16
 
         val bufferInfo = MediaCodec.BufferInfo()
         var inputDone = false
         var outputDone = false
         val timeoutUs = 10_000L
+        val outputFile = File(outputPath)
 
-        RandomAccessFile(File(outputPath), "rw").use { raf ->
-            // Write placeholder WAV header (will be updated after decoding)
-            raf.write(buildWavHeader(0, srcSampleRate, channelCount, bitsPerSample))
+        try {
+            RandomAccessFile(outputFile, "rw").use { raf ->
+                // Write placeholder WAV header (will be updated after decoding)
+                raf.write(buildWavHeader(0, track.sampleRate, channelCount, bitsPerSample))
 
-            var totalPcmBytes = 0
+                // Int limits total size to ~2 GB, which matches the WAV format's
+                // 32-bit size fields. Files exceeding this would require RF64.
+                var totalPcmBytes = 0
 
-            while (!outputDone) {
-                if (!inputDone) {
-                    val inputBufferIndex = codec.dequeueInputBuffer(timeoutUs)
-                    if (inputBufferIndex >= 0) {
-                        val inputBuffer = codec.getInputBuffer(inputBufferIndex)!!
-                        val sampleSize = extractor.readSampleData(inputBuffer, 0)
-                        if (sampleSize < 0) {
-                            codec.queueInputBuffer(
-                                inputBufferIndex, 0, 0, 0,
-                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                            )
-                            inputDone = true
-                        } else {
-                            val presentationTimeUs = extractor.sampleTime
-                            codec.queueInputBuffer(
-                                inputBufferIndex, 0, sampleSize,
-                                presentationTimeUs, 0
-                            )
-                            extractor.advance()
+                while (!outputDone) {
+                    if (!inputDone) {
+                        val inputBufferIndex = codec.dequeueInputBuffer(timeoutUs)
+                        if (inputBufferIndex >= 0) {
+                            val inputBuffer = codec.getInputBuffer(inputBufferIndex)!!
+                            val sampleSize = track.extractor.readSampleData(inputBuffer, 0)
+                            if (sampleSize < 0) {
+                                codec.queueInputBuffer(
+                                    inputBufferIndex, 0, 0, 0,
+                                    MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                                )
+                                inputDone = true
+                            } else {
+                                val presentationTimeUs = track.extractor.sampleTime
+                                codec.queueInputBuffer(
+                                    inputBufferIndex, 0, sampleSize,
+                                    presentationTimeUs, 0
+                                )
+                                track.extractor.advance()
+                            }
                         }
+                    }
+
+                    val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
+                    if (outputBufferIndex >= 0) {
+                        if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                            outputDone = true
+                        }
+                        if (bufferInfo.size > 0) {
+                            val outputBuffer = codec.getOutputBuffer(outputBufferIndex)!!
+                            var chunk = ByteArray(bufferInfo.size)
+                            outputBuffer.get(chunk)
+
+                            if (needsChannelConversion) {
+                                chunk = convertChannels(chunk, track.channelCount, targetChannels!!)
+                            }
+                            if (needsBitDepthConversion) {
+                                chunk = convertBitDepth(chunk, 16, bitsPerSample)
+                            }
+
+                            raf.write(chunk)
+                            totalPcmBytes += chunk.size
+                        }
+                        codec.releaseOutputBuffer(outputBufferIndex, false)
                     }
                 }
 
-                val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
-                if (outputBufferIndex >= 0) {
-                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        outputDone = true
-                    }
-                    if (bufferInfo.size > 0) {
-                        val outputBuffer = codec.getOutputBuffer(outputBufferIndex)!!
-                        var chunk = ByteArray(bufferInfo.size)
-                        outputBuffer.get(chunk)
-
-                        if (needsChannelConversion) {
-                            chunk = convertChannels(chunk, srcChannelCount, targetChannels!!)
-                        }
-                        if (needsBitDepthConversion) {
-                            chunk = convertBitDepth(chunk, 16, bitsPerSample)
-                        }
-
-                        raf.write(chunk)
-                        totalPcmBytes += chunk.size
-                    }
-                    codec.releaseOutputBuffer(outputBufferIndex, false)
-                }
+                // Seek back and write the final WAV header with the actual data size
+                raf.seek(0)
+                raf.write(buildWavHeader(totalPcmBytes, track.sampleRate, channelCount, bitsPerSample))
             }
-
+        } catch (e: Exception) {
+            outputFile.delete()
+            throw e
+        } finally {
             codec.stop()
             codec.release()
-            extractor.release()
-
-            // Seek back and write the final WAV header with the actual data size
-            raf.seek(0)
-            raf.write(buildWavHeader(totalPcmBytes, srcSampleRate, channelCount, bitsPerSample))
+            track.extractor.release()
         }
     }
 
     private fun performConversionBuffered(inputPath: String, outputPath: String, targetSampleRate: Int? = null, targetChannels: Int? = null, targetBitDepth: Int? = null) {
-        val extractor = MediaExtractor()
-        extractor.setDataSource(inputPath)
-
-        var audioTrackIndex = -1
-        var format: MediaFormat? = null
-        for (i in 0 until extractor.trackCount) {
-            val trackFormat = extractor.getTrackFormat(i)
-            val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: ""
-            if (mime.startsWith("audio/")) {
-                audioTrackIndex = i
-                format = trackFormat
-                break
-            }
-        }
-        if (audioTrackIndex == -1 || format == null) {
-            extractor.release()
-            throw Exception("No audio track found in $inputPath")
-        }
-
-        extractor.selectTrack(audioTrackIndex)
-
-        val mime = format.getString(MediaFormat.KEY_MIME)!!
-        val srcSampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val srcChannelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+        val track = extractAudioTrack(inputPath)
         val bitsPerSample = targetBitDepth ?: 16
 
-        val codec = MediaCodec.createDecoderByType(mime)
-        codec.configure(format, null, null, 0)
+        val codec = MediaCodec.createDecoderByType(track.mime)
+        codec.configure(track.format, null, null, 0)
         codec.start()
 
         val pcmOutput = ByteArrayOutputStream()
@@ -451,7 +444,7 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                 val inputBufferIndex = codec.dequeueInputBuffer(timeoutUs)
                 if (inputBufferIndex >= 0) {
                     val inputBuffer = codec.getInputBuffer(inputBufferIndex)!!
-                    val sampleSize = extractor.readSampleData(inputBuffer, 0)
+                    val sampleSize = track.extractor.readSampleData(inputBuffer, 0)
                     if (sampleSize < 0) {
                         codec.queueInputBuffer(
                             inputBufferIndex, 0, 0, 0,
@@ -459,12 +452,12 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                         )
                         inputDone = true
                     } else {
-                        val presentationTimeUs = extractor.sampleTime
+                        val presentationTimeUs = track.extractor.sampleTime
                         codec.queueInputBuffer(
                             inputBufferIndex, 0, sampleSize,
                             presentationTimeUs, 0
                         )
-                        extractor.advance()
+                        track.extractor.advance()
                     }
                 }
             }
@@ -486,22 +479,25 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
 
         codec.stop()
         codec.release()
-        extractor.release()
+        track.extractor.release()
 
         var pcmData = pcmOutput.toByteArray()
-        var sampleRate = srcSampleRate
-        var channelCount = srcChannelCount
+        var sampleRate = track.sampleRate
+        var channelCount = track.channelCount
 
-        if (targetChannels != null && targetChannels != srcChannelCount) {
-            pcmData = convertChannels(pcmData, srcChannelCount, targetChannels)
+        // Convert channels if needed (source is 16-bit PCM from decoder)
+        if (targetChannels != null && targetChannels != track.channelCount) {
+            pcmData = convertChannels(pcmData, track.channelCount, targetChannels)
             channelCount = targetChannels
         }
 
-        if (targetSampleRate != null && targetSampleRate != srcSampleRate) {
-            pcmData = resamplePcm(pcmData, srcSampleRate, targetSampleRate, channelCount)
+        // Resample if needed
+        if (targetSampleRate != null && targetSampleRate != track.sampleRate) {
+            pcmData = resamplePcm(pcmData, track.sampleRate, targetSampleRate, channelCount)
             sampleRate = targetSampleRate
         }
 
+        // Convert bit depth if needed (source is always 16-bit from MediaCodec)
         if (bitsPerSample != 16) {
             pcmData = convertBitDepth(pcmData, 16, bitsPerSample)
         }
