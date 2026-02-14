@@ -1,3 +1,11 @@
+## 0.7.0
+
+* **Streaming WAV conversion** — decoded PCM chunks are now streamed directly to disk during WAV conversion, significantly reducing peak memory usage for large files.
+  * Implemented on Android, iOS, macOS, Linux, and Windows.
+* Add Dart-level input validation for `convertToWav` and `convertToWavBytes` parameters.
+  * `sampleRate`, `channels`, and `bitDepth` are validated before calling native code, throwing `ArgumentError` for invalid values.
+* Consolidate duplicate iOS/macOS Swift plugin code into shared source under `darwin/Classes/`.
+
 ## 0.6.0
 
 * Add `includeHeader` parameter to `convertToWavBytes` (default `true`).
