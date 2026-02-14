@@ -5,23 +5,16 @@
 // gestures. You can also use WidgetTester to find child widgets in the widget
 // tree, read text, and verify that the values of widget properties are correct.
 
-import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:audio_decoder_example/main.dart';
 
 void main() {
-  testWidgets('Verify Platform version', (WidgetTester tester) async {
+  testWidgets('App renders with initial status text', (WidgetTester tester) async {
     // Build our app and trigger a frame.
     await tester.pumpWidget(const MyApp());
 
-    // Verify that platform version is retrieved.
-    expect(
-      find.byWidgetPredicate(
-        (Widget widget) =>
-            widget is Text && widget.data!.startsWith('Running on:'),
-      ),
-      findsOneWidget,
-    );
+    // Verify that the app renders with the initial status text.
+    expect(find.text('Ready - tap a button to test audio operations.'), findsOneWidget);
   });
 }
