@@ -317,7 +317,7 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                 return AudioTrackInfo(
                     extractor = extractor,
                     format = trackFormat,
-                    mime = trackFormat.getString(MediaFormat.KEY_MIME)!!,
+                    mime = mime,
                     sampleRate = trackFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE),
                     channelCount = trackFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
                 )
@@ -336,8 +336,7 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         // so fall back to the buffered path when a sample rate change is requested.
         val needsResampling = targetSampleRate != null && targetSampleRate != track.sampleRate
         if (needsResampling) {
-            track.extractor.release()
-            performConversionBuffered(inputPath, outputPath, targetSampleRate, targetChannels, targetBitDepth)
+            performConversionBuffered(track, outputPath, targetSampleRate, targetChannels, targetBitDepth)
             return
         }
 
@@ -394,15 +393,12 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                         }
                         if (bufferInfo.size > 0) {
                             val outputBuffer = codec.getOutputBuffer(outputBufferIndex)!!
-                            var chunk = ByteArray(bufferInfo.size)
-                            outputBuffer.get(chunk)
+                            val rawChunk = ByteArray(bufferInfo.size)
+                            outputBuffer.get(rawChunk)
 
-                            if (needsChannelConversion) {
-                                chunk = convertChannels(chunk, track.channelCount, targetChannels!!)
-                            }
-                            if (needsBitDepthConversion) {
-                                chunk = convertBitDepth(chunk, 16, bitsPerSample)
-                            }
+                            val chunk = rawChunk
+                                .let { if (needsChannelConversion) convertChannels(it, track.channelCount, targetChannels!!) else it }
+                                .let { if (needsBitDepthConversion) convertBitDepth(it, 16, bitsPerSample) else it }
 
                             raf.write(chunk)
                             totalPcmBytes += chunk.size
@@ -425,86 +421,92 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         }
     }
 
-    private fun performConversionBuffered(inputPath: String, outputPath: String, targetSampleRate: Int? = null, targetChannels: Int? = null, targetBitDepth: Int? = null) {
-        val track = extractAudioTrack(inputPath)
+    private fun performConversionBuffered(track: AudioTrackInfo, outputPath: String, targetSampleRate: Int? = null, targetChannels: Int? = null, targetBitDepth: Int? = null) {
         val bitsPerSample = targetBitDepth ?: 16
 
         val codec = MediaCodec.createDecoderByType(track.mime)
         codec.configure(track.format, null, null, 0)
         codec.start()
 
-        val pcmOutput = ByteArrayOutputStream()
-        val bufferInfo = MediaCodec.BufferInfo()
-        var inputDone = false
-        var outputDone = false
-        val timeoutUs = 10_000L
+        val outputFile = File(outputPath)
 
-        while (!outputDone) {
-            if (!inputDone) {
-                val inputBufferIndex = codec.dequeueInputBuffer(timeoutUs)
-                if (inputBufferIndex >= 0) {
-                    val inputBuffer = codec.getInputBuffer(inputBufferIndex)!!
-                    val sampleSize = track.extractor.readSampleData(inputBuffer, 0)
-                    if (sampleSize < 0) {
-                        codec.queueInputBuffer(
-                            inputBufferIndex, 0, 0, 0,
-                            MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                        )
-                        inputDone = true
-                    } else {
-                        val presentationTimeUs = track.extractor.sampleTime
-                        codec.queueInputBuffer(
-                            inputBufferIndex, 0, sampleSize,
-                            presentationTimeUs, 0
-                        )
-                        track.extractor.advance()
+        try {
+            val pcmOutput = ByteArrayOutputStream()
+            val bufferInfo = MediaCodec.BufferInfo()
+            var inputDone = false
+            var outputDone = false
+            val timeoutUs = 10_000L
+
+            while (!outputDone) {
+                if (!inputDone) {
+                    val inputBufferIndex = codec.dequeueInputBuffer(timeoutUs)
+                    if (inputBufferIndex >= 0) {
+                        val inputBuffer = codec.getInputBuffer(inputBufferIndex)!!
+                        val sampleSize = track.extractor.readSampleData(inputBuffer, 0)
+                        if (sampleSize < 0) {
+                            codec.queueInputBuffer(
+                                inputBufferIndex, 0, 0, 0,
+                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
+                            )
+                            inputDone = true
+                        } else {
+                            val presentationTimeUs = track.extractor.sampleTime
+                            codec.queueInputBuffer(
+                                inputBufferIndex, 0, sampleSize,
+                                presentationTimeUs, 0
+                            )
+                            track.extractor.advance()
+                        }
                     }
                 }
+
+                val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
+                if (outputBufferIndex >= 0) {
+                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        outputDone = true
+                    }
+                    if (bufferInfo.size > 0) {
+                        val outputBuffer = codec.getOutputBuffer(outputBufferIndex)!!
+                        val chunk = ByteArray(bufferInfo.size)
+                        outputBuffer.get(chunk)
+                        pcmOutput.write(chunk)
+                    }
+                    codec.releaseOutputBuffer(outputBufferIndex, false)
+                }
             }
 
-            val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
-            if (outputBufferIndex >= 0) {
-                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                    outputDone = true
-                }
-                if (bufferInfo.size > 0) {
-                    val outputBuffer = codec.getOutputBuffer(outputBufferIndex)!!
-                    val chunk = ByteArray(bufferInfo.size)
-                    outputBuffer.get(chunk)
-                    pcmOutput.write(chunk)
-                }
-                codec.releaseOutputBuffer(outputBufferIndex, false)
+            var pcmData = pcmOutput.toByteArray()
+            var sampleRate = track.sampleRate
+            var channelCount = track.channelCount
+
+            // Convert channels if needed (source is 16-bit PCM from decoder)
+            if (targetChannels != null && targetChannels != track.channelCount) {
+                pcmData = convertChannels(pcmData, track.channelCount, targetChannels)
+                channelCount = targetChannels
             }
-        }
 
-        codec.stop()
-        codec.release()
-        track.extractor.release()
+            // Resample if needed
+            if (targetSampleRate != null && targetSampleRate != track.sampleRate) {
+                pcmData = resamplePcm(pcmData, track.sampleRate, targetSampleRate, channelCount)
+                sampleRate = targetSampleRate
+            }
 
-        var pcmData = pcmOutput.toByteArray()
-        var sampleRate = track.sampleRate
-        var channelCount = track.channelCount
+            // Convert bit depth if needed (source is always 16-bit from MediaCodec)
+            if (bitsPerSample != 16) {
+                pcmData = convertBitDepth(pcmData, 16, bitsPerSample)
+            }
 
-        // Convert channels if needed (source is 16-bit PCM from decoder)
-        if (targetChannels != null && targetChannels != track.channelCount) {
-            pcmData = convertChannels(pcmData, track.channelCount, targetChannels)
-            channelCount = targetChannels
-        }
-
-        // Resample if needed
-        if (targetSampleRate != null && targetSampleRate != track.sampleRate) {
-            pcmData = resamplePcm(pcmData, track.sampleRate, targetSampleRate, channelCount)
-            sampleRate = targetSampleRate
-        }
-
-        // Convert bit depth if needed (source is always 16-bit from MediaCodec)
-        if (bitsPerSample != 16) {
-            pcmData = convertBitDepth(pcmData, 16, bitsPerSample)
-        }
-
-        FileOutputStream(File(outputPath)).use { fos ->
-            fos.write(buildWavHeader(pcmData.size, sampleRate, channelCount, bitsPerSample))
-            fos.write(pcmData)
+            FileOutputStream(outputFile).use { fos ->
+                fos.write(buildWavHeader(pcmData.size, sampleRate, channelCount, bitsPerSample))
+                fos.write(pcmData)
+            }
+        } catch (e: Exception) {
+            outputFile.delete()
+            throw e
+        } finally {
+            codec.stop()
+            codec.release()
+            track.extractor.release()
         }
     }
 
