@@ -5,6 +5,8 @@ import AVFoundation
 public class AudioDecoderPlugin: NSObject, FlutterPlugin {
     /// Standard RIFF/WAV header size in bytes (no extra chunks).
     private static let wavHeaderSize = 44
+    /// Maximum PCM data size for a valid WAV file (~4 GB).
+    private static let maxWavDataSize: Int64 = 0xFFFF_FFFF - 36
 
     public static func register(with registrar: FlutterPluginRegistrar) {
         let channel = FlutterMethodChannel(
@@ -196,31 +198,6 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
         trackOutput.alwaysCopiesSampleData = false
         assetReader.add(trackOutput)
 
-        guard assetReader.startReading() else {
-            throw NSError(domain: "AudioDecoder", code: 3,
-                          userInfo: [NSLocalizedDescriptionKey:
-                                        "AVAssetReader failed to start: \(assetReader.error?.localizedDescription ?? "unknown")"])
-        }
-
-        var pcmData = Data()
-        while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
-            if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
-                let length = CMBlockBufferGetDataLength(blockBuffer)
-                var data = Data(count: length)
-                _ = data.withUnsafeMutableBytes { ptr in
-                    CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
-                                               destination: ptr.baseAddress!)
-                }
-                pcmData.append(data)
-            }
-        }
-
-        if assetReader.status == .failed {
-            throw NSError(domain: "AudioDecoder", code: 4,
-                          userInfo: [NSLocalizedDescriptionKey:
-                                        "AVAssetReader failed: \(assetReader.error?.localizedDescription ?? "unknown")"])
-        }
-
         guard let formatDesc = audioTrack.formatDescriptions.first else {
             throw NSError(domain: "AudioDecoder", code: 5,
                           userInfo: [NSLocalizedDescriptionKey: "No format description available"])
@@ -233,8 +210,57 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
         let sampleRate = targetSampleRate ?? Int(asbd.mSampleRate)
         let channels = targetChannels ?? Int(asbd.mChannelsPerFrame)
 
-        try writeWavFile(outputURL: outputURL, pcmData: pcmData,
-                         sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample)
+        guard assetReader.startReading() else {
+            throw NSError(domain: "AudioDecoder", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey:
+                                        "AVAssetReader failed to start: \(assetReader.error?.localizedDescription ?? "unknown")"])
+        }
+
+        guard fm.createFile(atPath: outputPath, contents: nil) else {
+            throw NSError(domain: "AudioDecoder", code: 6,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot create output file at \(outputPath)"])
+        }
+        let fileHandle = try FileHandle(forWritingTo: outputURL)
+        do {
+            // Write placeholder WAV header (will be updated after decoding)
+            fileHandle.write(buildWavHeader(pcmDataSize: 0,
+                                            sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample))
+
+            var totalPcmBytes: Int64 = 0
+            while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
+                if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
+                    let length = CMBlockBufferGetDataLength(blockBuffer)
+                    var chunk = Data(count: length)
+                    _ = chunk.withUnsafeMutableBytes { ptr in
+                        CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
+                                                   destination: ptr.baseAddress!)
+                    }
+                    fileHandle.write(chunk)
+                    totalPcmBytes += Int64(length)
+                    if totalPcmBytes > AudioDecoderPlugin.maxWavDataSize {
+                        throw NSError(domain: "AudioDecoder", code: 7,
+                                      userInfo: [NSLocalizedDescriptionKey:
+                                                    "WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments."])
+                    }
+                }
+            }
+
+            if assetReader.status == .failed {
+                throw NSError(domain: "AudioDecoder", code: 4,
+                              userInfo: [NSLocalizedDescriptionKey:
+                                            "AVAssetReader failed: \(assetReader.error?.localizedDescription ?? "unknown")"])
+            }
+
+            // Seek back and write the final WAV header with the actual data size.
+            fileHandle.seek(toFileOffset: 0)
+            fileHandle.write(buildWavHeader(pcmDataSize: Int(totalPcmBytes),
+                                            sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample))
+            fileHandle.closeFile()
+        } catch {
+            fileHandle.closeFile()
+            try? fm.removeItem(at: outputURL)
+            throw error
+        }
     }
 
     // MARK: - Convert to M4A
@@ -460,29 +486,6 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             trackOutput.alwaysCopiesSampleData = false
             assetReader.add(trackOutput)
 
-            guard assetReader.startReading() else {
-                throw NSError(domain: "AudioDecoder", code: 34,
-                              userInfo: [NSLocalizedDescriptionKey: "AVAssetReader failed to start"])
-            }
-
-            var pcmData = Data()
-            while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
-                if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
-                    let length = CMBlockBufferGetDataLength(blockBuffer)
-                    var data = Data(count: length)
-                    _ = data.withUnsafeMutableBytes { ptr in
-                        CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
-                                                   destination: ptr.baseAddress!)
-                    }
-                    pcmData.append(data)
-                }
-            }
-
-            if assetReader.status == .failed {
-                throw NSError(domain: "AudioDecoder", code: 35,
-                              userInfo: [NSLocalizedDescriptionKey: "AVAssetReader failed"])
-            }
-
             guard let formatDesc = audioTrack.formatDescriptions.first else {
                 throw NSError(domain: "AudioDecoder", code: 36,
                               userInfo: [NSLocalizedDescriptionKey: "No format description available"])
@@ -495,8 +498,53 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
             let sampleRate = Int(asbd.mSampleRate)
             let channels = Int(asbd.mChannelsPerFrame)
 
-            try writeWavFile(outputURL: outputURL, pcmData: pcmData,
-                             sampleRate: sampleRate, channels: channels, bitsPerSample: 16)
+            guard assetReader.startReading() else {
+                throw NSError(domain: "AudioDecoder", code: 34,
+                              userInfo: [NSLocalizedDescriptionKey: "AVAssetReader failed to start"])
+            }
+
+            guard fm.createFile(atPath: outputPath, contents: nil) else {
+                throw NSError(domain: "AudioDecoder", code: 37,
+                              userInfo: [NSLocalizedDescriptionKey: "Cannot create output file at \(outputPath)"])
+            }
+            let fileHandle = try FileHandle(forWritingTo: outputURL)
+            do {
+                fileHandle.write(buildWavHeader(pcmDataSize: 0,
+                                                sampleRate: sampleRate, channels: channels, bitsPerSample: 16))
+
+                var totalPcmBytes: Int64 = 0
+                while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
+                    if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
+                        let length = CMBlockBufferGetDataLength(blockBuffer)
+                        var chunk = Data(count: length)
+                        _ = chunk.withUnsafeMutableBytes { ptr in
+                            CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
+                                                       destination: ptr.baseAddress!)
+                        }
+                        fileHandle.write(chunk)
+                        totalPcmBytes += Int64(length)
+                        if totalPcmBytes > AudioDecoderPlugin.maxWavDataSize {
+                            throw NSError(domain: "AudioDecoder", code: 38,
+                                          userInfo: [NSLocalizedDescriptionKey:
+                                                        "WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments."])
+                        }
+                    }
+                }
+
+                if assetReader.status == .failed {
+                    throw NSError(domain: "AudioDecoder", code: 35,
+                                  userInfo: [NSLocalizedDescriptionKey: "AVAssetReader failed"])
+                }
+
+                fileHandle.seek(toFileOffset: 0)
+                fileHandle.write(buildWavHeader(pcmDataSize: Int(totalPcmBytes),
+                                                sampleRate: sampleRate, channels: channels, bitsPerSample: 16))
+                fileHandle.closeFile()
+            } catch {
+                fileHandle.closeFile()
+                try? fm.removeItem(at: outputURL)
+                throw error
+            }
         }
     }
 
@@ -729,30 +777,27 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
         }
     }
 
-    // MARK: - WAV writing helper
+    // MARK: - WAV header helper
 
-    private func writeWavFile(outputURL: URL, pcmData: Data,
-                              sampleRate: Int, channels: Int, bitsPerSample: Int) throws {
+    private func buildWavHeader(pcmDataSize: Int, sampleRate: Int, channels: Int, bitsPerSample: Int) -> Data {
         let byteRate = sampleRate * channels * (bitsPerSample / 8)
         let blockAlign = channels * (bitsPerSample / 8)
 
-        var wavData = Data()
-        wavData.append(contentsOf: [UInt8]("RIFF".utf8))
-        wavData.append(UInt32(36 + pcmData.count).littleEndianBytes)
-        wavData.append(contentsOf: [UInt8]("WAVE".utf8))
-        wavData.append(contentsOf: [UInt8]("fmt ".utf8))
-        wavData.append(UInt32(16).littleEndianBytes)
-        wavData.append(UInt16(1).littleEndianBytes)
-        wavData.append(UInt16(channels).littleEndianBytes)
-        wavData.append(UInt32(sampleRate).littleEndianBytes)
-        wavData.append(UInt32(byteRate).littleEndianBytes)
-        wavData.append(UInt16(blockAlign).littleEndianBytes)
-        wavData.append(UInt16(bitsPerSample).littleEndianBytes)
-        wavData.append(contentsOf: [UInt8]("data".utf8))
-        wavData.append(UInt32(pcmData.count).littleEndianBytes)
-        wavData.append(pcmData)
-
-        try wavData.write(to: outputURL)
+        var header = Data()
+        header.append(contentsOf: [UInt8]("RIFF".utf8))
+        header.append(UInt32(36 + pcmDataSize).littleEndianBytes)
+        header.append(contentsOf: [UInt8]("WAVE".utf8))
+        header.append(contentsOf: [UInt8]("fmt ".utf8))
+        header.append(UInt32(16).littleEndianBytes)
+        header.append(UInt16(1).littleEndianBytes)
+        header.append(UInt16(channels).littleEndianBytes)
+        header.append(UInt32(sampleRate).littleEndianBytes)
+        header.append(UInt32(byteRate).littleEndianBytes)
+        header.append(UInt16(blockAlign).littleEndianBytes)
+        header.append(UInt16(bitsPerSample).littleEndianBytes)
+        header.append(contentsOf: [UInt8]("data".utf8))
+        header.append(UInt32(pcmDataSize).littleEndianBytes)
+        return header
     }
 }
 
