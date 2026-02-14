@@ -398,6 +398,8 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                             }
                             if (bufferInfo.size > 0) {
                                 val outputBuffer = codec.getOutputBuffer(outputBufferIndex)!!
+                                outputBuffer.position(bufferInfo.offset)
+                                outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
                                 val rawChunk = ByteArray(bufferInfo.size)
                                 outputBuffer.get(rawChunk)
 
@@ -479,6 +481,8 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                     }
                     if (bufferInfo.size > 0) {
                         val outputBuffer = codec.getOutputBuffer(outputBufferIndex)!!
+                        outputBuffer.position(bufferInfo.offset)
+                        outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
                         val chunk = ByteArray(bufferInfo.size)
                         outputBuffer.get(chunk)
                         pcmOutput.write(chunk)

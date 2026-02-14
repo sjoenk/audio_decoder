@@ -8,7 +8,8 @@ import 'package:audio_decoder/audio_decoder.dart';
 
 /// Benchmark test that measures conversion speed for large audio files.
 ///
-/// ## Setup
+/// These tests are **skipped by default** unless the large test assets are
+/// bundled. To run them:
 ///
 /// 1. Place large audio files in `example/assets/`:
 ///    - `test_large.mp3` (e.g. 5-10 min, ~10-20 MB)
@@ -37,15 +38,22 @@ void main() {
   late String mp3Path;
   late String m4aPath;
   late String wavPath;
+  var assetsAvailable = false;
   final results = <String>[];
 
   setUpAll(() async {
     tempDir = Directory.systemTemp.createTempSync('audio_decoder_bench_');
 
-    // Copy assets to temp dir once (not timed).
-    mp3Path = await _copyAsset('test_large.mp3', tempDir);
-    m4aPath = await _copyAsset('test_large.m4a', tempDir);
-    wavPath = await _copyAsset('test_large.wav', tempDir);
+    // Try loading the large assets. If they are not bundled, all tests
+    // in this file will be skipped gracefully.
+    try {
+      mp3Path = await _copyAsset('test_large.mp3', tempDir);
+      m4aPath = await _copyAsset('test_large.m4a', tempDir);
+      wavPath = await _copyAsset('test_large.wav', tempDir);
+      assetsAvailable = true;
+    } catch (_) {
+      // Assets not bundled — tests will be skipped.
+    }
   });
 
   tearDownAll(() {
@@ -69,6 +77,10 @@ void main() {
 
   group('Benchmark: convertToWav (default)', () {
     testWidgets('MP3 → WAV', (WidgetTester tester) async {
+      if (!assetsAvailable) {
+        markTestSkipped('test_large.* assets not bundled');
+        return;
+      }
       final out = outputPath('bench_mp3', 'wav');
 
       final sw = Stopwatch()..start();
@@ -80,6 +92,10 @@ void main() {
     });
 
     testWidgets('M4A → WAV', (WidgetTester tester) async {
+      if (!assetsAvailable) {
+        markTestSkipped('test_large.* assets not bundled');
+        return;
+      }
       final out = outputPath('bench_m4a', 'wav');
 
       final sw = Stopwatch()..start();
@@ -95,6 +111,10 @@ void main() {
 
   group('Benchmark: streaming path', () {
     testWidgets('MP3 → WAV mono', (WidgetTester tester) async {
+      if (!assetsAvailable) {
+        markTestSkipped('test_large.* assets not bundled');
+        return;
+      }
       final out = outputPath('bench_stream_mono', 'wav');
 
       final sw = Stopwatch()..start();
@@ -106,6 +126,10 @@ void main() {
     });
 
     testWidgets('MP3 → WAV 24bit', (WidgetTester tester) async {
+      if (!assetsAvailable) {
+        markTestSkipped('test_large.* assets not bundled');
+        return;
+      }
       final out = outputPath('bench_stream_24bit', 'wav');
 
       final sw = Stopwatch()..start();
@@ -121,6 +145,10 @@ void main() {
 
   group('Benchmark: convertToM4a', () {
     testWidgets('WAV → M4A', (WidgetTester tester) async {
+      if (!assetsAvailable) {
+        markTestSkipped('test_large.* assets not bundled');
+        return;
+      }
       final out = outputPath('bench_wav_m4a', 'm4a');
 
       final sw = Stopwatch()..start();
