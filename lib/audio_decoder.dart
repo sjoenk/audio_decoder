@@ -91,7 +91,7 @@ final class AudioDecoder {
     if (channels != null && channels <= 0) {
       throw ArgumentError.value(channels, 'channels', 'Must be positive');
     }
-    if (bitDepth != null && ![8, 16, 24, 32].contains(bitDepth)) {
+    if (bitDepth != null && !const [8, 16, 24, 32].contains(bitDepth)) {
       throw ArgumentError.value(bitDepth, 'bitDepth', 'Must be 8, 16, 24, or 32');
     }
   }
