@@ -214,6 +214,88 @@ void main() {
     });
   });
 
+  group('parameter validation', () {
+    late MockAudioDecoderPlatform fakePlatform;
+
+    setUp(() {
+      fakePlatform = MockAudioDecoderPlatform();
+      AudioDecoderPlatform.instance = fakePlatform;
+    });
+
+    test('convertToWav rejects zero sampleRate', () {
+      expect(
+        () => AudioDecoder.convertToWav('/in.mp3', '/out.wav', sampleRate: 0),
+        throwsArgumentError,
+      );
+    });
+
+    test('convertToWav rejects negative sampleRate', () {
+      expect(
+        () => AudioDecoder.convertToWav('/in.mp3', '/out.wav', sampleRate: -1),
+        throwsArgumentError,
+      );
+    });
+
+    test('convertToWav rejects zero channels', () {
+      expect(
+        () => AudioDecoder.convertToWav('/in.mp3', '/out.wav', channels: 0),
+        throwsArgumentError,
+      );
+    });
+
+    test('convertToWav rejects negative channels', () {
+      expect(
+        () => AudioDecoder.convertToWav('/in.mp3', '/out.wav', channels: -5),
+        throwsArgumentError,
+      );
+    });
+
+    test('convertToWav rejects invalid bitDepth', () {
+      expect(
+        () => AudioDecoder.convertToWav('/in.mp3', '/out.wav', bitDepth: 12),
+        throwsArgumentError,
+      );
+    });
+
+    test('convertToWavBytes rejects zero sampleRate', () {
+      expect(
+        () => AudioDecoder.convertToWavBytes(Uint8List(1), formatHint: 'mp3', sampleRate: 0),
+        throwsArgumentError,
+      );
+    });
+
+    test('convertToWavBytes rejects negative channels', () {
+      expect(
+        () => AudioDecoder.convertToWavBytes(Uint8List(1), formatHint: 'mp3', channels: -1),
+        throwsArgumentError,
+      );
+    });
+
+    test('convertToWavBytes rejects invalid bitDepth', () {
+      expect(
+        () => AudioDecoder.convertToWavBytes(Uint8List(1), formatHint: 'mp3', bitDepth: 7),
+        throwsArgumentError,
+      );
+    });
+
+    test('convertToWav accepts valid parameters', () async {
+      final result = await AudioDecoder.convertToWav('/in.mp3', '/out.wav',
+          sampleRate: 44100, channels: 2, bitDepth: 16);
+      expect(result, '/out.wav');
+    });
+
+    test('convertToWavBytes accepts all valid bitDepths', () async {
+      for (final depth in [8, 16, 24, 32]) {
+        final result = await AudioDecoder.convertToWavBytes(
+          Uint8List.fromList([1, 2, 3]),
+          formatHint: 'mp3',
+          bitDepth: depth,
+        );
+        expect(result, isNotEmpty, reason: 'bitDepth $depth should be valid');
+      }
+    });
+  });
+
   group('convertToWav with optional parameters', () {
     late MockAudioDecoderPlatform fakePlatform;
 

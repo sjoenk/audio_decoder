@@ -28,6 +28,7 @@ final class AudioDecoder {
     int? channels,
     int? bitDepth,
   }) {
+    _validateWavParameters(sampleRate: sampleRate, channels: channels, bitDepth: bitDepth);
     return AudioDecoderPlatform.instance.convertToWav(inputPath, outputPath, sampleRate: sampleRate, channels: channels, bitDepth: bitDepth);
   }
 
@@ -79,6 +80,20 @@ final class AudioDecoder {
     int numberOfSamples = 100,
   }) {
     return AudioDecoderPlatform.instance.getWaveform(path, numberOfSamples);
+  }
+
+  /// Validates [sampleRate], [channels], and [bitDepth] parameters
+  /// shared by all WAV conversion methods.
+  static void _validateWavParameters({int? sampleRate, int? channels, int? bitDepth}) {
+    if (sampleRate != null && sampleRate <= 0) {
+      throw ArgumentError.value(sampleRate, 'sampleRate', 'Must be positive');
+    }
+    if (channels != null && channels <= 0) {
+      throw ArgumentError.value(channels, 'channels', 'Must be positive');
+    }
+    if (bitDepth != null && ![8, 16, 24, 32].contains(bitDepth)) {
+      throw ArgumentError.value(bitDepth, 'bitDepth', 'Must be 8, 16, 24, or 32');
+    }
   }
 
   /// Known audio extensions that can be converted to WAV.
@@ -137,6 +152,7 @@ final class AudioDecoder {
     int? bitDepth,
     bool includeHeader = true,
   }) {
+    _validateWavParameters(sampleRate: sampleRate, channels: channels, bitDepth: bitDepth);
     return AudioDecoderPlatform.instance.convertToWavBytes(inputData, formatHint,
         sampleRate: sampleRate, channels: channels, bitDepth: bitDepth,
         includeHeader: includeHeader);
