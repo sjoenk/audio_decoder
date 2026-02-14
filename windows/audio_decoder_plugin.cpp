@@ -28,6 +28,9 @@
 /// Standard RIFF/WAV header size in bytes (no extra chunks).
 static constexpr size_t kWavHeaderSize = 44;
 
+/// Maximum PCM data size that fits in a standard WAV file (~4 GB).
+static constexpr int64_t kMaxWavDataSize = 0xFFFFFFFFL - 36;
+
 static std::wstring Utf8ToWide(const std::string& utf8) {
     if (utf8.empty()) return {};
     int size = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
@@ -428,8 +431,10 @@ void AudioDecoderPlugin::HandleMethodCall(
     }
 }
 
-AudioDecoderPlugin::PcmResult AudioDecoderPlugin::DecodeToPcm(
-    const std::string& inputPath, int64_t startMs, int64_t endMs,
+AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::DecodeToPcmStream(
+    const std::string& inputPath,
+    const std::function<void(const uint8_t*, size_t)>& onChunk,
+    int64_t startMs, int64_t endMs,
     int targetSampleRate, int targetChannels, int targetBitDepth) {
 
     MFSession session;
@@ -445,13 +450,13 @@ AudioDecoderPlugin::PcmResult AudioDecoderPlugin::DecodeToPcm(
         throw std::runtime_error("Failed to create source reader for input file");
     }
 
-    int bitsPerSample = (targetBitDepth > 0) ? targetBitDepth : 16;
+    int bitsPerSampleHint = (targetBitDepth > 0) ? targetBitDepth : 16;
 
     IMFMediaType* pPartialType = nullptr;
     MFCreateMediaType(&pPartialType);
     pPartialType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
     pPartialType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-    pPartialType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, bitsPerSample);
+    pPartialType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, bitsPerSampleHint);
     if (targetSampleRate > 0) {
         pPartialType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, targetSampleRate);
     }
@@ -494,73 +499,138 @@ AudioDecoderPlugin::PcmResult AudioDecoderPlugin::DecodeToPcm(
 
     int64_t endHns = (endMs >= 0) ? endMs * 10000LL : -1;
 
-    std::vector<uint8_t> pcmData;
-    while (true) {
-        DWORD flags = 0;
-        LONGLONG timestamp = 0;
-        IMFSample* pSample = nullptr;
-        hr = pReader->ReadSample(
-            (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-            0, nullptr, &flags, &timestamp, &pSample);
+    try {
+        while (true) {
+            DWORD flags = 0;
+            LONGLONG timestamp = 0;
+            IMFSample* pSample = nullptr;
+            hr = pReader->ReadSample(
+                (DWORD)MF_SOURCE_READER_FIRST_AUDIO_STREAM,
+                0, nullptr, &flags, &timestamp, &pSample);
 
-        if (FAILED(hr)) break;
-        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
-            if (pSample) pSample->Release();
-            break;
-        }
-
-        if (endHns >= 0 && timestamp > endHns) {
-            if (pSample) pSample->Release();
-            break;
-        }
-
-        if (pSample) {
-            IMFMediaBuffer* pBuffer = nullptr;
-            pSample->ConvertToContiguousBuffer(&pBuffer);
-            if (pBuffer) {
-                BYTE* pAudioData = nullptr;
-                DWORD cbBuffer = 0;
-                hr = pBuffer->Lock(&pAudioData, nullptr, &cbBuffer);
-                if (SUCCEEDED(hr)) {
-                    pcmData.insert(pcmData.end(), pAudioData, pAudioData + cbBuffer);
-                    pBuffer->Unlock();
-                }
-                pBuffer->Release();
+            if (FAILED(hr)) break;
+            if (flags & MF_SOURCE_READERF_ENDOFSTREAM) {
+                if (pSample) pSample->Release();
+                break;
             }
-            pSample->Release();
+
+            if (endHns >= 0 && timestamp > endHns) {
+                if (pSample) pSample->Release();
+                break;
+            }
+
+            if (pSample) {
+                IMFMediaBuffer* pBuffer = nullptr;
+                pSample->ConvertToContiguousBuffer(&pBuffer);
+                if (pBuffer) {
+                    BYTE* pAudioData = nullptr;
+                    DWORD cbBuffer = 0;
+                    hr = pBuffer->Lock(&pAudioData, nullptr, &cbBuffer);
+                    if (SUCCEEDED(hr)) {
+                        try {
+                            onChunk(pAudioData, cbBuffer);
+                        } catch (...) {
+                            pBuffer->Unlock();
+                            pBuffer->Release();
+                            pSample->Release();
+                            throw;
+                        }
+                        pBuffer->Unlock();
+                    }
+                    pBuffer->Release();
+                }
+                pSample->Release();
+            }
         }
+    } catch (...) {
+        pReader->Release();
+        throw;
     }
     pReader->Release();
 
-    PcmResult res;
-    res.data = std::move(pcmData);
-    res.sampleRate = sampleRate;
-    res.channels = channels;
-    res.bitsPerSample = bitsPerSample;
-    return res;
+    PcmInfo info;
+    info.sampleRate = sampleRate;
+    info.channels = channels;
+    info.bitsPerSample = bitsPerSample;
+    return info;
+}
+
+AudioDecoderPlugin::PcmResult AudioDecoderPlugin::DecodeToPcm(
+    const std::string& inputPath, int64_t startMs, int64_t endMs,
+    int targetSampleRate, int targetChannels, int targetBitDepth) {
+
+    PcmResult result{};
+    auto info = DecodeToPcmStream(inputPath,
+        [&](const uint8_t* data, size_t size) {
+            result.data.insert(result.data.end(), data, data + size);
+        },
+        startMs, endMs, targetSampleRate, targetChannels, targetBitDepth);
+    result.sampleRate = info.sampleRate;
+    result.channels = info.channels;
+    result.bitsPerSample = info.bitsPerSample;
+    return result;
+}
+
+AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::StreamPcmToWav(
+    const std::string& inputPath, const std::string& outputPath,
+    int64_t startMs, int64_t endMs,
+    int targetSampleRate, int targetChannels, int targetBitDepth) {
+
+    std::wstring wOutputPath = Utf8ToWide(outputPath);
+    std::fstream file(wOutputPath,
+                      std::ios::binary | std::ios::in | std::ios::out | std::ios::trunc);
+    if (!file.is_open()) {
+        throw std::runtime_error("Cannot open output file for writing");
+    }
+
+    WriteWavHeader(file, 0, 0, 0, 0);
+
+    int64_t totalPcmBytes = 0;
+    PcmInfo info{};
+    try {
+        info = DecodeToPcmStream(inputPath,
+            [&](const uint8_t* data, size_t size) {
+                file.write(reinterpret_cast<const char*>(data), size);
+                if (!file) {
+                    throw std::runtime_error("Failed to write PCM data to WAV file");
+                }
+                totalPcmBytes += static_cast<int64_t>(size);
+                if (totalPcmBytes > kMaxWavDataSize) {
+                    throw std::runtime_error("WAV output exceeds maximum size (~4 GB)");
+                }
+            },
+            startMs, endMs, targetSampleRate, targetChannels, targetBitDepth);
+    } catch (...) {
+        file.close();
+        DeleteFileW(wOutputPath.c_str());
+        throw;
+    }
+
+    if (totalPcmBytes == 0) {
+        file.close();
+        DeleteFileW(wOutputPath.c_str());
+        throw std::runtime_error("No audio data decoded");
+    }
+
+    file.seekp(0);
+    if (!file) {
+        file.close();
+        DeleteFileW(wOutputPath.c_str());
+        throw std::runtime_error("Failed to seek to beginning of WAV file");
+    }
+    WriteWavHeader(file, static_cast<uint32_t>(totalPcmBytes), info.sampleRate,
+                   static_cast<uint16_t>(info.channels),
+                   static_cast<uint16_t>(info.bitsPerSample));
+    file.close();
+    return info;
 }
 
 std::string AudioDecoderPlugin::ConvertToWav(
     const std::string& inputPath, const std::string& outputPath,
     int targetSampleRate, int targetChannels, int targetBitDepth) {
 
-    auto pcm = DecodeToPcm(inputPath, -1, -1, targetSampleRate, targetChannels, targetBitDepth);
-
-    if (pcm.data.empty()) {
-        throw std::runtime_error("No audio data decoded from input file");
-    }
-
-    std::wstring wOutputPath = Utf8ToWide(outputPath);
-    std::ofstream file(wOutputPath, std::ios::binary);
-    if (!file.is_open()) {
-        throw std::runtime_error("Cannot open output file for writing");
-    }
-
-    WriteWavHeader(file, static_cast<uint32_t>(pcm.data.size()), pcm.sampleRate,
-                   static_cast<uint16_t>(pcm.channels), static_cast<uint16_t>(pcm.bitsPerSample));
-    file.write(reinterpret_cast<char*>(pcm.data.data()), pcm.data.size());
-    file.close();
-
+    StreamPcmToWav(inputPath, outputPath, -1, -1,
+                   targetSampleRate, targetChannels, targetBitDepth);
     return outputPath;
 }
 
@@ -778,6 +848,9 @@ std::string AudioDecoderPlugin::TrimAudio(
     std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
 
     if (ext == "m4a") {
+        // M4A trimming uses DecodeToPcm (full buffering) because
+        // IMFSinkWriter requires sample-by-sample feeding from PCM data
+        // which cannot easily be streamed from DecodeToPcmStream.
         MFSession session;
         if (!session.IsInitialized()) {
             throw std::runtime_error("Failed to initialize Media Foundation");
@@ -856,15 +929,7 @@ std::string AudioDecoderPlugin::TrimAudio(
         pWriter->Finalize();
         pWriter->Release();
     } else {
-        std::wstring wOutputPath = Utf8ToWide(outputPath);
-        std::ofstream file(wOutputPath, std::ios::binary);
-        if (!file.is_open()) {
-            throw std::runtime_error("Cannot open output file for writing");
-        }
-        WriteWavHeader(file, static_cast<uint32_t>(pcm.data.size()), pcm.sampleRate,
-                       static_cast<uint16_t>(pcm.channels), static_cast<uint16_t>(pcm.bitsPerSample));
-        file.write(reinterpret_cast<char*>(pcm.data.data()), pcm.data.size());
-        file.close();
+        StreamPcmToWav(inputPath, outputPath, startMs, endMs);
     }
 
     return outputPath;
@@ -919,7 +984,7 @@ flutter::EncodableList AudioDecoderPlugin::GetWaveform(
 }
 
 void AudioDecoderPlugin::WriteWavHeader(
-    std::ofstream& file, uint32_t dataSize, uint32_t sampleRate,
+    std::ostream& file, uint32_t dataSize, uint32_t sampleRate,
     uint16_t channels, uint16_t bitsPerSample) {
 
     uint32_t byteRate = sampleRate * channels * bitsPerSample / 8;
