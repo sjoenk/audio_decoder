@@ -216,51 +216,11 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                                         "AVAssetReader failed to start: \(assetReader.error?.localizedDescription ?? "unknown")"])
         }
 
-        guard fm.createFile(atPath: outputPath, contents: nil) else {
-            throw NSError(domain: "AudioDecoder", code: 6,
-                          userInfo: [NSLocalizedDescriptionKey: "Cannot create output file at \(outputPath)"])
-        }
-        let fileHandle = try FileHandle(forWritingTo: outputURL)
-        do {
-            // Write placeholder WAV header (will be updated after decoding)
-            fileHandle.write(buildWavHeader(pcmDataSize: 0,
-                                            sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample))
-
-            var totalPcmBytes: Int64 = 0
-            while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
-                if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
-                    let length = CMBlockBufferGetDataLength(blockBuffer)
-                    var chunk = Data(count: length)
-                    _ = chunk.withUnsafeMutableBytes { ptr in
-                        CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
-                                                   destination: ptr.baseAddress!)
-                    }
-                    fileHandle.write(chunk)
-                    totalPcmBytes += Int64(length)
-                    if totalPcmBytes > AudioDecoderPlugin.maxWavDataSize {
-                        throw NSError(domain: "AudioDecoder", code: 7,
-                                      userInfo: [NSLocalizedDescriptionKey:
-                                                    "WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments."])
-                    }
-                }
-            }
-
-            if assetReader.status == .failed {
-                throw NSError(domain: "AudioDecoder", code: 4,
-                              userInfo: [NSLocalizedDescriptionKey:
-                                            "AVAssetReader failed: \(assetReader.error?.localizedDescription ?? "unknown")"])
-            }
-
-            // Seek back and write the final WAV header with the actual data size.
-            fileHandle.seek(toFileOffset: 0)
-            fileHandle.write(buildWavHeader(pcmDataSize: Int(totalPcmBytes),
-                                            sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample))
-            fileHandle.closeFile()
-        } catch {
-            fileHandle.closeFile()
-            try? fm.removeItem(at: outputURL)
-            throw error
-        }
+        try streamPcmToWav(
+            assetReader: assetReader, trackOutput: trackOutput,
+            outputURL: outputURL, sampleRate: sampleRate, channels: channels,
+            bitsPerSample: bitsPerSample,
+            readerFailedCode: 4, overflowCode: 7, createFileFailedCode: 6)
     }
 
     // MARK: - Convert to M4A
@@ -504,48 +464,11 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                               userInfo: [NSLocalizedDescriptionKey: "AVAssetReader failed to start"])
             }
 
-            guard fm.createFile(atPath: outputPath, contents: nil) else {
-                throw NSError(domain: "AudioDecoder", code: 37,
-                              userInfo: [NSLocalizedDescriptionKey: "Cannot create output file at \(outputPath)"])
-            }
-            let fileHandle = try FileHandle(forWritingTo: outputURL)
-            do {
-                fileHandle.write(buildWavHeader(pcmDataSize: 0,
-                                                sampleRate: sampleRate, channels: channels, bitsPerSample: 16))
-
-                var totalPcmBytes: Int64 = 0
-                while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
-                    if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
-                        let length = CMBlockBufferGetDataLength(blockBuffer)
-                        var chunk = Data(count: length)
-                        _ = chunk.withUnsafeMutableBytes { ptr in
-                            CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
-                                                       destination: ptr.baseAddress!)
-                        }
-                        fileHandle.write(chunk)
-                        totalPcmBytes += Int64(length)
-                        if totalPcmBytes > AudioDecoderPlugin.maxWavDataSize {
-                            throw NSError(domain: "AudioDecoder", code: 38,
-                                          userInfo: [NSLocalizedDescriptionKey:
-                                                        "WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments."])
-                        }
-                    }
-                }
-
-                if assetReader.status == .failed {
-                    throw NSError(domain: "AudioDecoder", code: 35,
-                                  userInfo: [NSLocalizedDescriptionKey: "AVAssetReader failed"])
-                }
-
-                fileHandle.seek(toFileOffset: 0)
-                fileHandle.write(buildWavHeader(pcmDataSize: Int(totalPcmBytes),
-                                                sampleRate: sampleRate, channels: channels, bitsPerSample: 16))
-                fileHandle.closeFile()
-            } catch {
-                fileHandle.closeFile()
-                try? fm.removeItem(at: outputURL)
-                throw error
-            }
+            try streamPcmToWav(
+                assetReader: assetReader, trackOutput: trackOutput,
+                outputURL: outputURL, sampleRate: sampleRate, channels: channels,
+                bitsPerSample: 16,
+                readerFailedCode: 35, overflowCode: 38, createFileFailedCode: 37)
         }
     }
 
@@ -782,7 +705,75 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
         }
     }
 
-    // MARK: - WAV header helper
+    // MARK: - WAV streaming & header helpers
+
+    /// Streams decoded PCM chunks from an AVAssetReader to a WAV file on disk.
+    ///
+    /// The caller must have already called `assetReader.startReading()` before invoking this method.
+    private func streamPcmToWav(
+        assetReader: AVAssetReader,
+        trackOutput: AVAssetReaderTrackOutput,
+        outputURL: URL,
+        sampleRate: Int,
+        channels: Int,
+        bitsPerSample: Int,
+        readerFailedCode: Int,
+        overflowCode: Int,
+        createFileFailedCode: Int
+    ) throws {
+        let fm = FileManager.default
+        let outputPath = outputURL.path
+
+        guard fm.createFile(atPath: outputPath, contents: nil) else {
+            throw NSError(domain: "AudioDecoder", code: createFileFailedCode,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot create output file at \(outputPath)"])
+        }
+        let fileHandle = try FileHandle(forWritingTo: outputURL)
+        var success = false
+        defer {
+            try? fileHandle.close()
+            if !success {
+                try? fm.removeItem(at: outputURL)
+            }
+        }
+
+        // Write placeholder WAV header (will be updated after decoding)
+        fileHandle.write(buildWavHeader(pcmDataSize: 0,
+                                        sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample))
+
+        var totalPcmBytes: Int64 = 0
+        while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
+            if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
+                let length = CMBlockBufferGetDataLength(blockBuffer)
+                var chunk = Data(count: length)
+                _ = chunk.withUnsafeMutableBytes { ptr in
+                    CMBlockBufferCopyDataBytes(blockBuffer, atOffset: 0, dataLength: length,
+                                               destination: ptr.baseAddress!)
+                }
+                totalPcmBytes += Int64(length)
+                if totalPcmBytes > AudioDecoderPlugin.maxWavDataSize {
+                    throw NSError(domain: "AudioDecoder", code: overflowCode,
+                                  userInfo: [NSLocalizedDescriptionKey:
+                                                "WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments."])
+                }
+                fileHandle.write(chunk)
+            }
+        }
+
+        if assetReader.status == .failed {
+            throw NSError(domain: "AudioDecoder", code: readerFailedCode,
+                          userInfo: [NSLocalizedDescriptionKey:
+                                        "AVAssetReader failed: \(assetReader.error?.localizedDescription ?? "unknown")"])
+        }
+
+        // Seek back and write the final WAV header with the actual data size.
+        // The Int cast is safe: totalPcmBytes is validated against maxWavDataSize (< 2^32),
+        // so the value always fits within Int on 64-bit Apple platforms.
+        fileHandle.seek(toFileOffset: 0)
+        fileHandle.write(buildWavHeader(pcmDataSize: Int(totalPcmBytes),
+                                        sampleRate: sampleRate, channels: channels, bitsPerSample: bitsPerSample))
+        success = true
+    }
 
     private func buildWavHeader(pcmDataSize: Int, sampleRate: Int, channels: Int, bitsPerSample: Int) -> Data {
         let byteRate = sampleRate * channels * (bitsPerSample / 8)
