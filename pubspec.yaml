@@ -43,8 +43,10 @@ flutter:
         pluginClass: AudioDecoderPlugin
       ios:
         pluginClass: AudioDecoderPlugin
+        sharedDarwinSource: true
       macos:
         pluginClass: AudioDecoderPlugin
+        sharedDarwinSource: true
       linux:
         pluginClass: AudioDecoderPlugin
       windows:

@@ -1,25 +1,26 @@
 PODS:
   - audio_decoder (0.0.1):
     - Flutter
+    - FlutterMacOS
   - Flutter (1.0.0)
   - integration_test (0.0.1):
     - Flutter
 
 DEPENDENCIES:
-  - audio_decoder (from `.symlinks/plugins/audio_decoder/ios`)
+  - audio_decoder (from `.symlinks/plugins/audio_decoder/darwin`)
   - Flutter (from `Flutter`)
   - integration_test (from `.symlinks/plugins/integration_test/ios`)
 
 EXTERNAL SOURCES:
   audio_decoder:
-    :path: ".symlinks/plugins/audio_decoder/ios"
+    :path: ".symlinks/plugins/audio_decoder/darwin"
   Flutter:
     :path: Flutter
   integration_test:
     :path: ".symlinks/plugins/integration_test/ios"
 
 SPEC CHECKSUMS:
-  audio_decoder: 0c52517c22f0b7f31dbbe380b440891290b7e80f
+  audio_decoder: d69cd0826db7b69c06535eeb6b4baab1dd833dd1
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
   integration_test: 4a889634ef21a45d28d50d622cf412dc6d9f586e
 
