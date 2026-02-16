@@ -340,7 +340,6 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
             val bitsPerSample = targetBitDepth ?: 16
 
             val needsResampling = targetSampleRate != null && targetSampleRate != track.sampleRate
-
             val codec = MediaCodec.createDecoderByType(track.mime)
             try {
                 codec.configure(track.format, null, null, 0)
@@ -414,6 +413,14 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                                 if (totalPcmBytes > MAX_WAV_DATA_SIZE) {
                                     throw Exception("WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments.")
                                 }
+                            } else if (isLastChunk && resamplerState != null) {
+                                // Flush remaining fractional samples from the resampler
+                                val flush = resampleChunk(resamplerState, ByteArray(0), true)
+                                if (flush.isNotEmpty()) {
+                                    val chunk = if (needsBitDepthConversion) convertBitDepth(flush, 16, bitsPerSample) else flush
+                                    raf.write(chunk)
+                                    totalPcmBytes += chunk.size
+                                }
                             }
                             codec.releaseOutputBuffer(outputBufferIndex, false)
                         }
@@ -449,12 +456,13 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
     private fun resampleChunk(state: ResamplerState, chunk: ByteArray, isLastChunk: Boolean): ByteArray {
         val bytesPerFrame = state.channels * 2
         val chunkFrames = chunk.size / bytesPerFrame
-        if (chunkFrames == 0) return ByteArray(0)
+        if (chunkFrames == 0 && state.lastFrame == null) return ByteArray(0)
 
-        val srcBuf = ByteBuffer.wrap(chunk).order(ByteOrder.LITTLE_ENDIAN)
-        val output = ByteArrayOutputStream()
-        val frameBuf = ByteArray(bytesPerFrame)
-        val frameWrap = ByteBuffer.wrap(frameBuf).order(ByteOrder.LITTLE_ENDIAN)
+        val srcBuf = if (chunkFrames > 0) ByteBuffer.wrap(chunk).order(ByteOrder.LITTLE_ENDIAN) else null
+        val maxFrames = ((chunkFrames + 1).toDouble() / state.step).toInt() + 2
+        val output = ByteArray(maxFrames * bytesPerFrame)
+        val outBuf = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN)
+        var outFrames = 0
 
         while (true) {
             val idx0 = floor(state.srcPos).toInt()
@@ -464,37 +472,39 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
             if (idx1 >= chunkFrames && !isLastChunk) break
 
             val frac = state.srcPos - idx0
-            frameWrap.clear()
             for (ch in 0 until state.channels) {
                 val s0 = if (idx0 < 0) {
                     state.lastFrame?.get(ch)?.toInt() ?: 0
                 } else {
-                    srcBuf.getShort(idx0 * bytesPerFrame + ch * 2).toInt()
+                    srcBuf!!.getShort(idx0 * bytesPerFrame + ch * 2).toInt()
                 }
                 val s1 = if (idx1 >= chunkFrames) {
                     s0
                 } else {
-                    srcBuf.getShort(idx1 * bytesPerFrame + ch * 2).toInt()
+                    srcBuf!!.getShort(idx1 * bytesPerFrame + ch * 2).toInt()
                 }
                 val interpolated = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767).toShort()
-                frameWrap.putShort(interpolated)
+                outBuf.putShort(interpolated)
             }
-            output.write(frameBuf)
+            outFrames++
 
             state.srcPos += state.step
         }
 
-        // Save last frame for interpolation across chunk boundaries
-        val lf = ShortArray(state.channels)
-        for (ch in 0 until state.channels) {
-            lf[ch] = srcBuf.getShort((chunkFrames - 1) * bytesPerFrame + ch * 2)
+        if (chunkFrames > 0) {
+            // Save last frame for interpolation across chunk boundaries
+            val lf = ShortArray(state.channels)
+            for (ch in 0 until state.channels) {
+                lf[ch] = srcBuf!!.getShort((chunkFrames - 1) * bytesPerFrame + ch * 2)
+            }
+            state.lastFrame = lf
+
+            // Adjust position relative to next chunk
+            state.srcPos -= chunkFrames
         }
-        state.lastFrame = lf
 
-        // Adjust position relative to next chunk
-        state.srcPos -= chunkFrames
-
-        return output.toByteArray()
+        val totalBytes = outFrames * bytesPerFrame
+        return if (totalBytes == output.size) output else output.copyOf(totalBytes)
     }
 
     private fun convertChannels(pcmData: ByteArray, srcChannels: Int, dstChannels: Int): ByteArray {
