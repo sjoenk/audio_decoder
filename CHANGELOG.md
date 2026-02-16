@@ -1,3 +1,9 @@
+## 0.7.1
+
+* Fix iOS build failure (`Module 'audio_decoder' not found`) when used as a pub dependency.
+* Use `sharedDarwinSource` for shared iOS/macOS podspec resolution.
+* Remove orphaned platform-specific podspec files.
+
 ## 0.7.0
 
 * **Streaming WAV conversion** — decoded PCM chunks are now streamed directly to disk during WAV conversion, significantly reducing peak memory usage for large files.
