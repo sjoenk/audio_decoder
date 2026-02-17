@@ -45,5 +45,8 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Medium assets for screenshots (provide your own)
+assets/test_medium.*
+
 # Large benchmark assets (provide your own, see integration_test/benchmark_test.dart)
 assets/test_large.*

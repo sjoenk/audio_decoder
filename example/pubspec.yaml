@@ -57,6 +57,10 @@ flutter:
     - assets/test_tone.m4a
     - assets/test_tone.mp3
     - assets/test_tone.wav
+    # Uncomment below for screenshots or demo purposes:
+    # - assets/test_medium.m4a
+    # - assets/test_medium.mp3
+    # - assets/test_medium.wav
     # Uncomment below to run benchmark_test.dart (see that file for setup):
     # - assets/test_large.m4a
     # - assets/test_large.mp3
