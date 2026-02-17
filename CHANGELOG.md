@@ -1,3 +1,11 @@
+## 0.7.2
+
+* **Android: streaming resampling** — replace in-memory resampling with chunk-based streaming to avoid OOM on large files.
+* Fix trailing sample loss when EOS arrives on an empty MediaCodec buffer.
+* Pre-allocate resampler output buffer instead of using `ByteArrayOutputStream` to reduce GC pressure.
+* Cap maximum target sample rate at 384 kHz to prevent pathological allocations.
+* Add `MAX_WAV_DATA_SIZE` validation to the resampler flush path.
+
 ## 0.7.1
 
 * Fix iOS build failure (`Module 'audio_decoder' not found`) when used as a pub dependency.

@@ -1,6 +1,6 @@
 name: audio_decoder
 description: "A lightweight Flutter plugin for converting, trimming, and analyzing audio files using native platform APIs. No FFmpeg required."
-version: 0.7.1
+version: 0.7.2
 homepage: https://www.silversoft.nl
 repository: https://github.com/sjoenk/audio_decoder
 
