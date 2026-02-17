@@ -1,9 +1,9 @@
 # audio_decoder
 
 [![pub package](https://img.shields.io/pub/v/audio_decoder.svg)](https://pub.dev/packages/audio_decoder)
-[![likes](https://img.shields.io/pub/likes/audio_decoder)](https://pub.dev/packages/audio_decoder/score)
-[![pub points](https://img.shields.io/pub/points/audio_decoder)](https://pub.dev/packages/audio_decoder/score)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![pub points](https://img.shields.io/pub/points/audio_decoder)](https://pub.dev/packages/audio_decoder/score)
+[![likes](https://img.shields.io/pub/likes/audio_decoder)](https://pub.dev/packages/audio_decoder/score)
 
 A lightweight Flutter plugin for converting, trimming, and analyzing audio files using native platform APIs. No FFmpeg dependency required.
 

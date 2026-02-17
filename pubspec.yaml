@@ -1,5 +1,5 @@
 name: audio_decoder
-description: "Decode MP3, AAC, FLAC, OGG & more to WAV/PCM using native platform APIs. Convert, trim, and analyze audio — no FFmpeg required."
+description: "Decode MP3, M4A, AAC, FLAC, OGG & more to WAV/PCM using native platform APIs. Convert, trim, and analyze audio — no FFmpeg required."
 version: 0.7.2
 homepage: https://www.silversoft.nl
 repository: https://github.com/sjoenk/audio_decoder
