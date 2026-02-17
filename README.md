@@ -19,6 +19,12 @@ A lightweight Flutter plugin for converting, trimming, and analyzing audio files
 - Supports Android, iOS, macOS, Windows, Linux, and Web
 - Minimal app size impact (~500KB vs ~15-30MB for FFmpeg)
 
+## Example
+
+The example app demonstrates all features with a Material 3 interface and waveform visualization:
+
+![Example App](screenshots/example_waveform.png)
+
 ## Platform APIs
 
 | Platform | Native API |
