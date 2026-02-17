@@ -1,3 +1,11 @@
+## 0.7.3
+
+* **Documentation & presentation improvements** (no API changes)
+  * Added screenshot of example app with waveform visualization for pub.dev.
+  * Redesigned example app with Material 3 design system (color-coded status, modern buttons, gradient waveform).
+  * Enhanced code documentation with helpful comments at all API call sites.
+  * Added pub.dev quality badges (license, pub points, likes) to README.
+
 ## 0.7.2
 
 * **Android: streaming resampling** — replace in-memory resampling with chunk-based streaming to avoid OOM on large files.

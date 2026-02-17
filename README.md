@@ -36,7 +36,7 @@ Add `audio_decoder` to your `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  audio_decoder: ^0.7.2
+  audio_decoder: ^0.7.3
 ```
 
 Or install via the command line:
