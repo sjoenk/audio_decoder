@@ -27,6 +27,7 @@ class _MyAppState extends State<MyApp> {
   // Business logic
   // ---------------------------------------------------------------------------
 
+  /// Helper to copy Flutter assets to temp directory for file-based API
   Future<String> _copyAssetToTemp(String assetPath) async {
     final data = await rootBundle.load(assetPath);
     final dir = Directory.systemTemp;
@@ -52,6 +53,7 @@ class _MyAppState extends State<MyApp> {
       final baseName = assetPath.split('/').last.replaceAll(RegExp(r'\.[^.]+$'), '');
 
       final outputPath = '${Directory.systemTemp.path}/${baseName}_converted.wav';
+      // Convert any audio format to WAV (lossless PCM)
       final result = await AudioDecoder.convertToWav(inputPath, outputPath);
       final outputSize = await File(result).length();
 
@@ -90,6 +92,7 @@ class _MyAppState extends State<MyApp> {
       final baseName = assetPath.split('/').last.replaceAll(RegExp(r'\.[^.]+$'), '');
 
       final outputPath = '${Directory.systemTemp.path}/${baseName}_converted.m4a';
+      // Convert any audio format to M4A (compressed AAC)
       final result = await AudioDecoder.convertToM4a(inputPath, outputPath);
       final outputSize = await File(result).length();
 
@@ -122,6 +125,7 @@ class _MyAppState extends State<MyApp> {
 
     try {
       final inputPath = await _copyAssetToTemp(assetPath);
+      // Get metadata: duration, sample rate, channels, bit rate, format
       final info = await AudioDecoder.getAudioInfo(inputPath);
 
       setState(() {
@@ -157,6 +161,7 @@ class _MyAppState extends State<MyApp> {
       final inputPath = await _copyAssetToTemp(assetPath);
       final inputSize = File(inputPath).lengthSync();
       final outputPath = '${Directory.systemTemp.path}/trimmed.wav';
+      // Extract a time range from audio file
       final result = await AudioDecoder.trimAudio(
         inputPath,
         outputPath,
@@ -183,10 +188,46 @@ class _MyAppState extends State<MyApp> {
     }
   }
 
+  Future<void> _getWaveform(String assetPath) async {
+    if (_busy) return;
+
+    setState(() {
+      _busy = true;
+      _waveform = null;
+      _statusType = _StatusType.loading;
+      _status = 'Extracting waveform...';
+    });
+
+    try {
+      final inputPath = await _copyAssetToTemp(assetPath);
+      // Extract normalized amplitude data (0.0-1.0) for waveform visualization
+      final waveform = await AudioDecoder.getWaveform(inputPath, numberOfSamples: 100);
+
+      setState(() {
+        _waveform = waveform;
+        _statusType = _StatusType.success;
+        _status = 'Waveform (${waveform.length} samples)';
+      });
+    } on AudioConversionException catch (e) {
+      setState(() {
+        _statusType = _StatusType.error;
+        _status = 'Waveform failed: $e';
+      });
+    } finally {
+      setState(() => _busy = false);
+    }
+  }
+
+  /// Helper to load Flutter assets as bytes
   Future<Uint8List> _loadAssetBytes(String assetPath) async {
     final data = await rootBundle.load(assetPath);
     return data.buffer.asUint8List();
   }
+
+  // ---------------------------------------------------------------------------
+  // Bytes API (in-memory) - Use when working with network responses, assets,
+  // or any in-memory audio data without file I/O
+  // ---------------------------------------------------------------------------
 
   Future<void> _convertToWavBytes(String assetPath) async {
     if (_busy) return;
@@ -201,6 +242,7 @@ class _MyAppState extends State<MyApp> {
 
     try {
       final inputBytes = await _loadAssetBytes(assetPath);
+      // Convert in-memory audio bytes to WAV format (requires formatHint)
       final wavBytes = await AudioDecoder.convertToWavBytes(inputBytes, formatHint: ext);
 
       setState(() {
@@ -235,6 +277,7 @@ class _MyAppState extends State<MyApp> {
     try {
       final inputBytes = await _loadAssetBytes(assetPath);
       final wavBytes = await AudioDecoder.convertToWavBytes(inputBytes, formatHint: ext);
+      // Get raw PCM data without WAV header (set includeHeader: false)
       final pcmBytes = await AudioDecoder.convertToWavBytes(inputBytes, formatHint: ext, includeHeader: false);
 
       setState(() {
@@ -343,7 +386,8 @@ class _MyAppState extends State<MyApp> {
 
     try {
       final inputBytes = await _loadAssetBytes(assetPath);
-      final waveform = await AudioDecoder.getWaveformBytes(inputBytes, formatHint: ext, numberOfSamples: 800);
+      // Extract waveform data from in-memory audio bytes
+      final waveform = await AudioDecoder.getWaveformBytes(inputBytes, formatHint: ext, numberOfSamples: 100);
 
       setState(() {
         _waveform = waveform;
@@ -354,35 +398,6 @@ class _MyAppState extends State<MyApp> {
       setState(() {
         _statusType = _StatusType.error;
         _status = 'Bytes waveform failed: $e';
-      });
-    } finally {
-      setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _getWaveform(String assetPath) async {
-    if (_busy) return;
-
-    setState(() {
-      _busy = true;
-      _waveform = null;
-      _statusType = _StatusType.loading;
-      _status = 'Extracting waveform...';
-    });
-
-    try {
-      final inputPath = await _copyAssetToTemp(assetPath);
-      final waveform = await AudioDecoder.getWaveform(inputPath, numberOfSamples: 100);
-
-      setState(() {
-        _waveform = waveform;
-        _statusType = _StatusType.success;
-        _status = 'Waveform (${waveform.length} samples)';
-      });
-    } on AudioConversionException catch (e) {
-      setState(() {
-        _statusType = _StatusType.error;
-        _status = 'Waveform failed: $e';
       });
     } finally {
       setState(() => _busy = false);
@@ -602,6 +617,7 @@ class _MyAppState extends State<MyApp> {
   }
 }
 
+/// CustomPainter for rendering audio waveform with gradient color effect
 class _WaveformPainter extends CustomPainter {
   final List<double> waveform;
   final Color color;
