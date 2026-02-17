@@ -34,6 +34,10 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         /// The RIFF chunk header stores total file size minus 8 as a uint32,
         /// so the data payload can be at most 2^32 - 1 - 36 bytes (~4 GB).
         private const val MAX_WAV_DATA_SIZE = 0xFFFFFFFFL - 36L
+
+        /// Maximum supported target sample rate (384 kHz covers all standard
+        /// audio formats including DXD and high-resolution PCM).
+        private const val MAX_SAMPLE_RATE = 384_000
     }
 
     private lateinit var channel: MethodChannel
@@ -340,6 +344,9 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
             val bitsPerSample = targetBitDepth ?: 16
 
             val needsResampling = targetSampleRate != null && targetSampleRate != track.sampleRate
+            if (targetSampleRate != null && targetSampleRate > MAX_SAMPLE_RATE) {
+                throw IllegalArgumentException("targetSampleRate $targetSampleRate exceeds maximum ($MAX_SAMPLE_RATE)")
+            }
             val codec = MediaCodec.createDecoderByType(track.mime)
             try {
                 codec.configure(track.format, null, null, 0)
@@ -420,6 +427,9 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                                     val chunk = if (needsBitDepthConversion) convertBitDepth(flush, 16, bitsPerSample) else flush
                                     raf.write(chunk)
                                     totalPcmBytes += chunk.size
+                                    if (totalPcmBytes > MAX_WAV_DATA_SIZE) {
+                                        throw Exception("WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments.")
+                                    }
                                 }
                             }
                             codec.releaseOutputBuffer(outputBufferIndex, false)
