@@ -22,6 +22,7 @@ import java.nio.ByteOrder
 import kotlin.concurrent.thread
 import kotlin.math.sqrt
 import kotlin.math.max
+import kotlin.math.floor
 import kotlin.math.min
 
 class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
@@ -33,6 +34,10 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         /// The RIFF chunk header stores total file size minus 8 as a uint32,
         /// so the data payload can be at most 2^32 - 1 - 36 bytes (~4 GB).
         private const val MAX_WAV_DATA_SIZE = 0xFFFFFFFFL - 36L
+
+        /// Maximum supported target sample rate (384 kHz covers all standard
+        /// audio formats including DXD and high-resolution PCM).
+        private const val MAX_SAMPLE_RATE = 384_000
     }
 
     private lateinit var channel: MethodChannel
@@ -338,22 +343,23 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         try {
             val bitsPerSample = targetBitDepth ?: 16
 
-            // Resampling requires the full PCM buffer upfront for interpolation,
-            // so fall back to the buffered path when a sample rate change is requested.
             val needsResampling = targetSampleRate != null && targetSampleRate != track.sampleRate
-            if (needsResampling) {
-                performConversionBuffered(track, outputPath, targetSampleRate, targetChannels, targetBitDepth)
-                return
+            if (targetSampleRate != null && targetSampleRate > MAX_SAMPLE_RATE) {
+                throw IllegalArgumentException("targetSampleRate $targetSampleRate exceeds maximum ($MAX_SAMPLE_RATE)")
             }
-
             val codec = MediaCodec.createDecoderByType(track.mime)
             try {
                 codec.configure(track.format, null, null, 0)
                 codec.start()
 
                 val channelCount = targetChannels ?: track.channelCount
+                val sampleRate = if (needsResampling) targetSampleRate!! else track.sampleRate
                 val needsChannelConversion = targetChannels != null && targetChannels != track.channelCount
                 val needsBitDepthConversion = bitsPerSample != 16
+                val resamplerState = if (needsResampling) ResamplerState(
+                    step = track.sampleRate.toDouble() / targetSampleRate!!.toDouble(),
+                    channels = channelCount
+                ) else null
 
                 val bufferInfo = MediaCodec.BufferInfo()
                 var inputDone = false
@@ -364,7 +370,7 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
 
                 RandomAccessFile(outputFile, "rw").use { raf ->
                     // Write placeholder WAV header (will be updated after decoding)
-                    raf.write(buildWavHeader(0, track.sampleRate, channelCount, bitsPerSample))
+                    raf.write(buildWavHeader(0, sampleRate, channelCount, bitsPerSample))
 
                     var totalPcmBytes = 0L
 
@@ -393,7 +399,8 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
 
                         val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
                         if (outputBufferIndex >= 0) {
-                            if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                            val isLastChunk = bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+                            if (isLastChunk) {
                                 outputDone = true
                             }
                             if (bufferInfo.size > 0) {
@@ -405,12 +412,24 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
 
                                 val chunk = rawChunk
                                     .let { if (needsChannelConversion) convertChannels(it, track.channelCount, targetChannels!!) else it }
+                                    .let { if (resamplerState != null) resampleChunk(resamplerState, it, isLastChunk) else it }
                                     .let { if (needsBitDepthConversion) convertBitDepth(it, 16, bitsPerSample) else it }
 
                                 raf.write(chunk)
                                 totalPcmBytes += chunk.size
                                 if (totalPcmBytes > MAX_WAV_DATA_SIZE) {
                                     throw Exception("WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments.")
+                                }
+                            } else if (isLastChunk && resamplerState != null) {
+                                // Flush remaining fractional samples from the resampler
+                                val flush = resampleChunk(resamplerState, ByteArray(0), true)
+                                if (flush.isNotEmpty()) {
+                                    val chunk = if (needsBitDepthConversion) convertBitDepth(flush, 16, bitsPerSample) else flush
+                                    raf.write(chunk)
+                                    totalPcmBytes += chunk.size
+                                    if (totalPcmBytes > MAX_WAV_DATA_SIZE) {
+                                        throw Exception("WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments.")
+                                    }
                                 }
                             }
                             codec.releaseOutputBuffer(outputBufferIndex, false)
@@ -422,7 +441,7 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                     // MAX_WAV_DATA_SIZE, so the bit pattern is a valid uint32 value
                     // that ByteBuffer.putInt writes correctly in little-endian.
                     raf.seek(0)
-                    raf.write(buildWavHeader(totalPcmBytes.toInt(), track.sampleRate, channelCount, bitsPerSample))
+                    raf.write(buildWavHeader(totalPcmBytes.toInt(), sampleRate, channelCount, bitsPerSample))
                 }
             } catch (e: Exception) {
                 File(outputPath).delete()
@@ -436,93 +455,66 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         }
     }
 
-    private fun performConversionBuffered(track: AudioTrackInfo, outputPath: String, targetSampleRate: Int? = null, targetChannels: Int? = null, targetBitDepth: Int? = null) {
-        val bitsPerSample = targetBitDepth ?: 16
-        val outputFile = File(outputPath)
+    private class ResamplerState(
+        val step: Double,
+        val channels: Int
+    ) {
+        var srcPos: Double = 0.0
+        var lastFrame: ShortArray? = null
+    }
 
-        val codec = MediaCodec.createDecoderByType(track.mime)
-        try {
-            codec.configure(track.format, null, null, 0)
-            codec.start()
+    private fun resampleChunk(state: ResamplerState, chunk: ByteArray, isLastChunk: Boolean): ByteArray {
+        val bytesPerFrame = state.channels * 2
+        val chunkFrames = chunk.size / bytesPerFrame
+        if (chunkFrames == 0 && state.lastFrame == null) return ByteArray(0)
 
-            val pcmOutput = ByteArrayOutputStream()
-            val bufferInfo = MediaCodec.BufferInfo()
-            var inputDone = false
-            var outputDone = false
-            val timeoutUs = 10_000L
+        val srcBuf = if (chunkFrames > 0) ByteBuffer.wrap(chunk).order(ByteOrder.LITTLE_ENDIAN) else null
+        val maxFrames = ((chunkFrames + 1).toDouble() / state.step).toInt() + 2
+        val output = ByteArray(maxFrames * bytesPerFrame)
+        val outBuf = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN)
+        var outFrames = 0
 
-            while (!outputDone) {
-                if (!inputDone) {
-                    val inputBufferIndex = codec.dequeueInputBuffer(timeoutUs)
-                    if (inputBufferIndex >= 0) {
-                        val inputBuffer = codec.getInputBuffer(inputBufferIndex)!!
-                        val sampleSize = track.extractor.readSampleData(inputBuffer, 0)
-                        if (sampleSize < 0) {
-                            codec.queueInputBuffer(
-                                inputBufferIndex, 0, 0, 0,
-                                MediaCodec.BUFFER_FLAG_END_OF_STREAM
-                            )
-                            inputDone = true
-                        } else {
-                            val presentationTimeUs = track.extractor.sampleTime
-                            codec.queueInputBuffer(
-                                inputBufferIndex, 0, sampleSize,
-                                presentationTimeUs, 0
-                            )
-                            track.extractor.advance()
-                        }
-                    }
+        while (true) {
+            val idx0 = floor(state.srcPos).toInt()
+            val idx1 = idx0 + 1
+
+            if (idx0 >= chunkFrames) break
+            if (idx1 >= chunkFrames && !isLastChunk) break
+
+            val frac = state.srcPos - idx0
+            for (ch in 0 until state.channels) {
+                val s0 = if (idx0 < 0) {
+                    state.lastFrame?.get(ch)?.toInt() ?: 0
+                } else {
+                    srcBuf!!.getShort(idx0 * bytesPerFrame + ch * 2).toInt()
                 }
-
-                val outputBufferIndex = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
-                if (outputBufferIndex >= 0) {
-                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                        outputDone = true
-                    }
-                    if (bufferInfo.size > 0) {
-                        val outputBuffer = codec.getOutputBuffer(outputBufferIndex)!!
-                        outputBuffer.position(bufferInfo.offset)
-                        outputBuffer.limit(bufferInfo.offset + bufferInfo.size)
-                        val chunk = ByteArray(bufferInfo.size)
-                        outputBuffer.get(chunk)
-                        pcmOutput.write(chunk)
-                    }
-                    codec.releaseOutputBuffer(outputBufferIndex, false)
+                val s1 = if (idx1 >= chunkFrames) {
+                    s0
+                } else {
+                    srcBuf!!.getShort(idx1 * bytesPerFrame + ch * 2).toInt()
                 }
+                val interpolated = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767).toShort()
+                outBuf.putShort(interpolated)
             }
+            outFrames++
 
-            var pcmData = pcmOutput.toByteArray()
-            var sampleRate = track.sampleRate
-            var channelCount = track.channelCount
-
-            // Convert channels if needed (source is 16-bit PCM from decoder)
-            if (targetChannels != null && targetChannels != track.channelCount) {
-                pcmData = convertChannels(pcmData, track.channelCount, targetChannels)
-                channelCount = targetChannels
-            }
-
-            // Resample if needed
-            if (targetSampleRate != null && targetSampleRate != track.sampleRate) {
-                pcmData = resamplePcm(pcmData, track.sampleRate, targetSampleRate, channelCount)
-                sampleRate = targetSampleRate
-            }
-
-            // Convert bit depth if needed (source is always 16-bit from MediaCodec)
-            if (bitsPerSample != 16) {
-                pcmData = convertBitDepth(pcmData, 16, bitsPerSample)
-            }
-
-            FileOutputStream(outputFile).use { fos ->
-                fos.write(buildWavHeader(pcmData.size, sampleRate, channelCount, bitsPerSample))
-                fos.write(pcmData)
-            }
-        } catch (e: Exception) {
-            outputFile.delete()
-            throw e
-        } finally {
-            try { codec.stop() } catch (_: IllegalStateException) {}
-            codec.release()
+            state.srcPos += state.step
         }
+
+        if (chunkFrames > 0) {
+            // Save last frame for interpolation across chunk boundaries
+            val lf = ShortArray(state.channels)
+            for (ch in 0 until state.channels) {
+                lf[ch] = srcBuf!!.getShort((chunkFrames - 1) * bytesPerFrame + ch * 2)
+            }
+            state.lastFrame = lf
+
+            // Adjust position relative to next chunk
+            state.srcPos -= chunkFrames
+        }
+
+        val totalBytes = outFrames * bytesPerFrame
+        return if (totalBytes == output.size) output else output.copyOf(totalBytes)
     }
 
     private fun convertChannels(pcmData: ByteArray, srcChannels: Int, dstChannels: Int): ByteArray {
@@ -551,30 +543,6 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
                 for (ch in 0 until dstChannels) {
                     dstBuf.putShort(i * dstBytesPerFrame + ch * 2, samples[if (ch < srcChannels) ch else 0])
                 }
-            }
-        }
-        return output
-    }
-
-    private fun resamplePcm(pcmData: ByteArray, srcRate: Int, dstRate: Int, channels: Int): ByteArray {
-        val bytesPerFrame = channels * 2 // 16-bit
-        val srcFrames = pcmData.size / bytesPerFrame
-        val dstFrames = (srcFrames.toLong() * dstRate / srcRate).toInt()
-        val output = ByteArray(dstFrames * bytesPerFrame)
-        val srcBuf = ByteBuffer.wrap(pcmData).order(ByteOrder.LITTLE_ENDIAN)
-        val dstBuf = ByteBuffer.wrap(output).order(ByteOrder.LITTLE_ENDIAN)
-
-        for (i in 0 until dstFrames) {
-            val srcPos = i.toDouble() * (srcFrames - 1) / max(1, dstFrames - 1)
-            val srcIdx = srcPos.toInt()
-            val frac = srcPos - srcIdx
-            val nextIdx = min(srcIdx + 1, srcFrames - 1)
-
-            for (ch in 0 until channels) {
-                val s0 = srcBuf.getShort(srcIdx * bytesPerFrame + ch * 2).toInt()
-                val s1 = srcBuf.getShort(nextIdx * bytesPerFrame + ch * 2).toInt()
-                val interpolated = (s0 + (s1 - s0) * frac).toInt().coerceIn(-32768, 32767).toShort()
-                dstBuf.putShort(i * bytesPerFrame + ch * 2, interpolated)
             }
         }
         return output
