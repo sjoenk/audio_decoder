@@ -16,7 +16,16 @@ void main() {
   late Directory tempDir;
 
   setUpAll(() {
-    tempDir = Directory.systemTemp.createTempSync('audio_decoder_test_');
+    if (Platform.isAndroid) {
+      // On Android `systemTemp` is the app's code_cache directory. Android
+      // clears cache directories (code_cache included) after a fresh install
+      // and whenever storage runs low, which makes files — and even the
+      // directory itself — disappear halfway through a run. The app's files
+      // directory is never cleared by the platform.
+      tempDir = Directory('${Directory.systemTemp.parent.path}/files/audio_decoder_test')..createSync(recursive: true);
+    } else {
+      tempDir = Directory.systemTemp.createTempSync('audio_decoder_test_');
+    }
   });
 
   tearDownAll(() {
