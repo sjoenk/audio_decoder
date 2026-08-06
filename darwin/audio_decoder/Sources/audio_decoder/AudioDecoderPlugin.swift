@@ -546,8 +546,9 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                           userInfo: [NSLocalizedDescriptionKey: "AVAssetReader failed to start"])
         }
 
-        // Read all PCM samples
-        var allSamples = [Int16]()
+        // RMS energy is folded into the accumulator while decoding, so the whole
+        // track never has to be held in memory (#49).
+        let accumulator = WaveformAccumulator(numberOfSamples: numberOfSamples)
         while let sampleBuffer = trackOutput.copyNextSampleBuffer() {
             if let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
                 let length = CMBlockBufferGetDataLength(blockBuffer)
@@ -557,53 +558,12 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
                                                destination: ptr.baseAddress!)
                 }
                 data.withUnsafeBytes { rawPtr in
-                    let samples = rawPtr.bindMemory(to: Int16.self)
-                    allSamples.append(contentsOf: samples)
+                    accumulator.addPcm(rawPtr)
                 }
             }
         }
 
-        if allSamples.isEmpty {
-            return Array(repeating: 0.0, count: numberOfSamples)
-        }
-
-        // Compute RMS per window
-        let samplesPerWindow = max(1, allSamples.count / numberOfSamples)
-        var waveform = [Double]()
-        var maxRms = 0.0
-
-        for i in 0..<numberOfSamples {
-            let start = i * allSamples.count / numberOfSamples
-            let end = min(start + samplesPerWindow, allSamples.count)
-            if start >= allSamples.count { break }
-
-            var sumSquares: Double = 0
-            for j in start..<end {
-                let sample = Double(allSamples[j])
-                sumSquares += sample * sample
-            }
-            let rms = sqrt(sumSquares / Double(end - start))
-            waveform.append(rms)
-            if rms > maxRms { maxRms = rms }
-        }
-
-        // Scale to 0.0-1.0 according to the requested normalization mode.
-        // Samples are signed 16-bit PCM with range [-32768, 32767], so the
-        // absolute mode divides by the max magnitude (32768) to keep the
-        // result inside [0.0, 1.0] even when a window is filled with -32768.
-        // (normalization is already validated up front.)
-        if normalization == "absolute" {
-            waveform = waveform.map { $0 / 32768.0 }
-        } else if maxRms > 0 {
-            waveform = waveform.map { $0 / maxRms }
-        }
-
-        // Pad if needed
-        while waveform.count < numberOfSamples {
-            waveform.append(0.0)
-        }
-
-        return waveform
+        return accumulator.build(normalization: normalization)
     }
 
     // MARK: - Temp file helper
@@ -822,6 +782,162 @@ public class AudioDecoderPlugin: NSObject, FlutterPlugin {
         header.append(contentsOf: [UInt8]("data".utf8))
         header.append(UInt32(pcmDataSize).littleEndianBytes)
         return header
+    }
+}
+
+/// Accumulates RMS energy for a waveform while the audio is still decoding.
+///
+/// Keeping every decoded sample is not an option — three hours of 44.1 kHz
+/// stereo audio is close to a billion samples — so energy is folded into a
+/// fixed set of buckets instead. Each bucket covers `samplesPerBucket`
+/// consecutive samples; once the arrays are full, adjacent buckets are merged
+/// pairwise and the span per bucket doubles. Memory therefore stays bounded
+/// regardless of duration, while short inputs (which never trigger a merge) are
+/// summarized sample-exact.
+///
+/// The caller is expected to validate the normalization mode beforehand.
+private final class WaveformAccumulator {
+    /// Aim for this many buckets per output point so window bounds land close
+    /// to a bucket edge, keeping the RMS error negligible once merging kicks in.
+    private static let bucketsPerWindow = 256
+    private static let minBuckets = 1024
+    /// Caps the accumulator at ~4 MB (one Double plus one Int64 per bucket).
+    private static let maxBuckets = 262_144
+
+    private let numberOfSamples: Int
+    private var sumSquares: [Double]
+    private var counts: [Int64]
+
+    /// Number of samples each full bucket covers; doubles on every merge.
+    private var samplesPerBucket: Int64 = 1
+    private var bucketCount = 0
+    private var totalSamples: Int64 = 0
+    private var pendingByte: UInt8 = 0
+    private var hasPendingByte = false
+
+    init(numberOfSamples: Int) {
+        self.numberOfSamples = numberOfSamples
+        let target = numberOfSamples * WaveformAccumulator.bucketsPerWindow
+        var capacity = min(max(target, WaveformAccumulator.minBuckets),
+                           WaveformAccumulator.maxBuckets)
+        // An even capacity keeps pairwise merging exact.
+        if !capacity.isMultiple(of: 2) { capacity += 1 }
+        sumSquares = [Double](repeating: 0, count: capacity)
+        counts = [Int64](repeating: 0, count: capacity)
+    }
+
+    /// Adds a chunk of interleaved little-endian 16-bit PCM. A sample split
+    /// across two chunks is carried over instead of dropped.
+    func addPcm(_ bytes: UnsafeRawBufferPointer) {
+        var offset = 0
+        if hasPendingByte, !bytes.isEmpty {
+            add(WaveformAccumulator.sample(low: pendingByte, high: bytes[0]))
+            hasPendingByte = false
+            offset = 1
+        }
+        while offset + 1 < bytes.count {
+            add(WaveformAccumulator.sample(low: bytes[offset], high: bytes[offset + 1]))
+            offset += 2
+        }
+        if offset < bytes.count {
+            pendingByte = bytes[offset]
+            hasPendingByte = true
+        }
+    }
+
+    /// Builds the normalized waveform from everything accumulated so far.
+    func build(normalization: String) -> [Double] {
+        if totalSamples == 0 {
+            return Array(repeating: 0.0, count: numberOfSamples)
+        }
+
+        let windowSize = max(1, totalSamples / Int64(numberOfSamples))
+        var waveform = [Double]()
+        var maxRms = 0.0
+
+        for i in 0..<numberOfSamples {
+            let start = Int64(i) * totalSamples / Int64(numberOfSamples)
+            if start >= totalSamples { break }
+            let end = min(start + windowSize, totalSamples)
+
+            let rms = sqrt(sumSquaresIn(start: start, end: end) / Double(end - start))
+            waveform.append(rms)
+            if rms > maxRms { maxRms = rms }
+        }
+
+        // Scale to 0.0-1.0 according to the requested normalization mode.
+        // Samples are signed 16-bit PCM with range [-32768, 32767], so the
+        // absolute mode divides by the max magnitude (32768) to keep the
+        // result inside [0.0, 1.0] even when a window is filled with -32768.
+        // (normalization is already validated up front.)
+        if normalization == "absolute" {
+            waveform = waveform.map { $0 / 32768.0 }
+        } else if maxRms > 0 {
+            waveform = waveform.map { $0 / maxRms }
+        }
+
+        // Pad if the audio was shorter than the requested resolution.
+        while waveform.count < numberOfSamples {
+            waveform.append(0.0)
+        }
+
+        return waveform
+    }
+
+    private static func sample(low: UInt8, high: UInt8) -> Int16 {
+        Int16(bitPattern: UInt16(low) | (UInt16(high) << 8))
+    }
+
+    private func add(_ sample: Int16) {
+        if bucketCount == 0 || counts[bucketCount - 1] >= samplesPerBucket {
+            if bucketCount == counts.count { mergeAdjacentBuckets() }
+            bucketCount += 1
+            sumSquares[bucketCount - 1] = 0
+            counts[bucketCount - 1] = 0
+        }
+        let value = Double(sample)
+        sumSquares[bucketCount - 1] += value * value
+        counts[bucketCount - 1] += 1
+        totalSamples += 1
+    }
+
+    /// Halves the resolution so more samples fit in the same arrays.
+    private func mergeAdjacentBuckets() {
+        var dst = 0
+        var src = 0
+        while src < bucketCount {
+            sumSquares[dst] = sumSquares[src] + sumSquares[src + 1]
+            counts[dst] = counts[src] + counts[src + 1]
+            dst += 1
+            src += 2
+        }
+        bucketCount = dst
+        samplesPerBucket *= 2
+    }
+
+    /// Sum of squares over the sample range `[start, end)`.
+    private func sumSquaresIn(start: Int64, end: Int64) -> Double {
+        var sum = 0.0
+        // Every bucket but the last is full, so bucket b starts at
+        // b * samplesPerBucket.
+        var bucket = Int(start / samplesPerBucket)
+        while bucket < bucketCount {
+            let bucketStart = Int64(bucket) * samplesPerBucket
+            if bucketStart >= end { break }
+            let bucketEnd = bucketStart + counts[bucket]
+            let overlap = min(end, bucketEnd) - max(start, bucketStart)
+            if overlap > 0 {
+                if overlap >= counts[bucket] {
+                    sum += sumSquares[bucket]
+                } else {
+                    // Partial overlap: assume the energy is spread evenly
+                    // across the bucket.
+                    sum += sumSquares[bucket] * Double(overlap) / Double(counts[bucket])
+                }
+            }
+            bucket += 1
+        }
+        return sum
     }
 }
 
