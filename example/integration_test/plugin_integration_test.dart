@@ -227,6 +227,40 @@ void main() {
       final size = await outputFile.length();
       expect(size, greaterThan(0));
     });
+
+    testWidgets('long file converts without exhausting memory (regression #49)', (
+      WidgetTester tester,
+    ) async {
+      // The decoder used to collect every PCM chunk before encoding started,
+      // so peak memory grew with the audio duration: three hours of 44.1 kHz
+      // stereo decodes to ~1.9 GB of PCM, well past the Android per-app heap
+      // limit. Decoding and encoding now run interleaved.
+      //
+      // Three minutes (~16 MB of PCM, thousands of chunks) is a compromise:
+      // software codecs on an emulator run at roughly real time, so the
+      // hundreds of megabytes it would take to actually hit the old heap
+      // ceiling would make this test run for half an hour. What it does cover
+      // is that a long chunk sequence still streams through end to end.
+      const frameCount = 44100 * 60 * 3;
+      final inputPath = '${tempDir.path}/long_tone_m4a_input.wav';
+      await writePcmWavFile(path: inputPath, frameCount: frameCount);
+      final outputPath = tempOutputPath('long_wav_to_m4a', 'm4a');
+
+      final result = await AudioDecoder.convertToM4a(inputPath, outputPath);
+
+      final outputFile = File(result);
+      expect(await outputFile.exists(), isTrue);
+      expect(await outputFile.length(), greaterThan(0));
+
+      final info = await AudioDecoder.getAudioInfo(result);
+      expect(
+        info.duration.inSeconds,
+        greaterThanOrEqualTo(175),
+        reason: 'Encoded output should cover the full input duration',
+      );
+
+      await File(inputPath).delete();
+    }, timeout: const Timeout(Duration(minutes: 10)));
   });
 
   // ── 4. getAudioInfo ─────────────────────────────────────────────────
