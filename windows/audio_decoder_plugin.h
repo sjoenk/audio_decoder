@@ -61,25 +61,17 @@ class AudioDecoderPlugin : public flutter::Plugin {
                           int targetChannels = -1,
                           int targetBitDepth = -1);
 
-  // Streaming decode: calls onChunk for each decoded PCM buffer
+  /// Streaming decode: calls onChunk for each decoded PCM buffer. When
+  /// onFormat is set it is invoked once with the output format before the
+  /// first chunk, so consumers that need the sample rate up front (an encoder,
+  /// for instance) do not have to buffer the audio first.
   PcmInfo DecodeToPcmStream(
       const std::string& inputPath,
       const std::function<void(const uint8_t*, size_t)>& onChunk,
       int64_t startMs = -1, int64_t endMs = -1,
       int targetSampleRate = -1, int targetChannels = -1,
-      int targetBitDepth = -1);
-
-  struct PcmResult {
-      std::vector<uint8_t> data;
-      uint32_t sampleRate;
-      uint32_t channels;
-      uint32_t bitsPerSample;
-  };
-  PcmResult DecodeToPcm(const std::string& inputPath,
-                         int64_t startMs = -1, int64_t endMs = -1,
-                         int targetSampleRate = -1,
-                         int targetChannels = -1,
-                         int targetBitDepth = -1);
+      int targetBitDepth = -1,
+      const std::function<void(const PcmInfo&)>& onFormat = nullptr);
 
   // Temp file helpers for bytes-based API
   std::string WriteTempFile(const std::vector<uint8_t>& data,

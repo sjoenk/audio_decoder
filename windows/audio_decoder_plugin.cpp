@@ -73,6 +73,315 @@ private:
     bool initialized_;
 };
 
+/// Streams 16-bit PCM into an AAC/M4A file through IMFSinkWriter.
+///
+/// Begin() is called once the PCM format is known — which is only after the
+/// source reader has been configured — after which every decoded buffer can be
+/// handed to WriteChunk() directly, so the audio never has to be buffered in
+/// full.
+class M4aStreamWriter {
+public:
+    explicit M4aStreamWriter(const std::string& outputPath)
+            : wOutputPath_(Utf8ToWide(outputPath)) {
+        DeleteFileW(wOutputPath_.c_str());
+    }
+
+    ~M4aStreamWriter() { Release(); }
+
+    M4aStreamWriter(const M4aStreamWriter&) = delete;
+    M4aStreamWriter& operator=(const M4aStreamWriter&) = delete;
+
+    void Begin(uint32_t sampleRate, uint32_t channels) {
+        if (sampleRate == 0 || channels == 0) {
+            throw std::runtime_error("Input reports an unusable PCM format");
+        }
+        blockAlign_ = static_cast<int64_t>(channels) * 2;
+        bytesPerSec_ = static_cast<int64_t>(sampleRate) * blockAlign_;
+
+        HRESULT hr = MFCreateSinkWriterFromURL(wOutputPath_.c_str(), nullptr,
+                                               nullptr, &pWriter_);
+        if (FAILED(hr)) {
+            throw std::runtime_error("Failed to create sink writer");
+        }
+
+        IMFMediaType* pAacType = nullptr;
+        MFCreateMediaType(&pAacType);
+        pAacType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+        pAacType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
+        pAacType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate);
+        pAacType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels);
+        pAacType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+        pAacType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 128000 / 8);
+
+        hr = pWriter_->AddStream(pAacType, &streamIndex_);
+        pAacType->Release();
+        if (FAILED(hr)) {
+            Release();
+            throw std::runtime_error("Failed to add AAC stream");
+        }
+
+        IMFMediaType* pInputType = nullptr;
+        MFCreateMediaType(&pInputType);
+        pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
+        pInputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
+        pInputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, sampleRate);
+        pInputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, channels);
+        pInputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+        pInputType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT,
+                              static_cast<UINT32>(blockAlign_));
+        pInputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+                              static_cast<UINT32>(bytesPerSec_));
+
+        hr = pWriter_->SetInputMediaType(streamIndex_, pInputType, nullptr);
+        pInputType->Release();
+        if (FAILED(hr)) {
+            Release();
+            throw std::runtime_error("Failed to set input type");
+        }
+
+        hr = pWriter_->BeginWriting();
+        if (FAILED(hr)) {
+            Release();
+            throw std::runtime_error("Failed to begin writing");
+        }
+        started_ = true;
+    }
+
+    void WriteChunk(const uint8_t* data, size_t size) {
+        if (!started_) {
+            throw std::runtime_error("Sink writer was not initialized");
+        }
+        if (size == 0) return;
+
+        IMFMediaBuffer* pBuffer = nullptr;
+        HRESULT hr = MFCreateMemoryBuffer(static_cast<DWORD>(size), &pBuffer);
+        if (FAILED(hr)) {
+            throw std::runtime_error("Failed to allocate encoder buffer");
+        }
+
+        BYTE* pBufData = nullptr;
+        hr = pBuffer->Lock(&pBufData, nullptr, nullptr);
+        if (FAILED(hr)) {
+            pBuffer->Release();
+            throw std::runtime_error("Failed to lock encoder buffer");
+        }
+        memcpy(pBufData, data, size);
+        pBuffer->Unlock();
+        pBuffer->SetCurrentLength(static_cast<DWORD>(size));
+
+        IMFSample* pSample = nullptr;
+        hr = MFCreateSample(&pSample);
+        if (FAILED(hr)) {
+            pBuffer->Release();
+            throw std::runtime_error("Failed to create encoder sample");
+        }
+        pSample->AddBuffer(pBuffer);
+        // Derive timestamps from the running byte count instead of summing
+        // per-chunk durations, which would drift on long recordings.
+        pSample->SetSampleTime(bytesWritten_ * kHnsPerSec / bytesPerSec_);
+        pSample->SetSampleDuration(
+            static_cast<LONGLONG>(size) * kHnsPerSec / bytesPerSec_);
+
+        hr = pWriter_->WriteSample(streamIndex_, pSample);
+        pSample->Release();
+        pBuffer->Release();
+        if (FAILED(hr)) {
+            throw std::runtime_error("Failed to write audio sample");
+        }
+        bytesWritten_ += static_cast<int64_t>(size);
+    }
+
+    void Finish() {
+        if (!started_) {
+            throw std::runtime_error("Sink writer was not initialized");
+        }
+        HRESULT hr = pWriter_->Finalize();
+        Release();
+        if (FAILED(hr)) {
+            DeleteFileW(wOutputPath_.c_str());
+            throw std::runtime_error("Failed to finalize M4A output");
+        }
+    }
+
+    /// Releases the writer and removes a partially written output file.
+    void Abort() {
+        Release();
+        DeleteFileW(wOutputPath_.c_str());
+    }
+
+private:
+    void Release() {
+        if (pWriter_) {
+            pWriter_->Release();
+            pWriter_ = nullptr;
+        }
+        started_ = false;
+    }
+
+    std::wstring wOutputPath_;
+    IMFSinkWriter* pWriter_ = nullptr;
+    DWORD streamIndex_ = 0;
+    int64_t blockAlign_ = 0;
+    int64_t bytesPerSec_ = 0;
+    int64_t bytesWritten_ = 0;
+    bool started_ = false;
+};
+
+/// Accumulates RMS energy for a waveform while the audio is still decoding.
+///
+/// Keeping every decoded sample is not an option — three hours of 44.1 kHz
+/// stereo audio is close to a billion samples — so energy is folded into a
+/// fixed set of buckets instead.  Each bucket covers samplesPerBucket_
+/// consecutive samples; once the arrays are full, adjacent buckets are merged
+/// pairwise and the span per bucket doubles.  Memory therefore stays bounded
+/// regardless of duration, while short inputs (which never trigger a merge) are
+/// summarized sample-exact.
+///
+/// The window bounds in Build() are computed with 64-bit arithmetic on purpose:
+/// for longer files the product `i * totalSamples` easily exceeds a 32-bit
+/// integer, which would wrap to a negative offset.  The caller is expected to
+/// validate the normalization mode beforehand.
+class WaveformAccumulator {
+public:
+    explicit WaveformAccumulator(int numberOfSamples)
+            : numberOfSamples_(numberOfSamples) {
+        // Aim for kBucketsPerWindow buckets per output point so window bounds
+        // land close to a bucket edge, keeping the RMS error negligible once
+        // merging kicks in.
+        int64_t target = static_cast<int64_t>(numberOfSamples) * kBucketsPerWindow;
+        int64_t capacity = (std::min)((std::max)(target, kMinBuckets), kMaxBuckets);
+        // An even capacity keeps pairwise merging exact.
+        if (capacity % 2 != 0) capacity++;
+        sumSquares_.resize(static_cast<size_t>(capacity), 0.0);
+        counts_.resize(static_cast<size_t>(capacity), 0);
+    }
+
+    /// Adds a chunk of interleaved little-endian 16-bit PCM.  A sample split
+    /// across two chunks is carried over instead of dropped.
+    void AddPcm(const uint8_t* data, size_t size) {
+        size_t offset = 0;
+        if (hasPendingByte_ && size > 0) {
+            Add(static_cast<int16_t>(static_cast<uint16_t>(pendingByte_) |
+                                     (static_cast<uint16_t>(data[0]) << 8)));
+            hasPendingByte_ = false;
+            offset = 1;
+        }
+        for (; offset + 1 < size; offset += 2) {
+            Add(static_cast<int16_t>(static_cast<uint16_t>(data[offset]) |
+                                     (static_cast<uint16_t>(data[offset + 1]) << 8)));
+        }
+        if (offset < size) {
+            pendingByte_ = data[offset];
+            hasPendingByte_ = true;
+        }
+    }
+
+    /// Builds the normalized waveform from everything accumulated so far.
+    std::vector<double> Build(const std::string& normalization) const {
+        if (totalSamples_ == 0) {
+            return std::vector<double>(static_cast<size_t>(numberOfSamples_), 0.0);
+        }
+
+        int64_t windowSize = (std::max)(static_cast<int64_t>(1),
+                                        totalSamples_ / numberOfSamples_);
+        std::vector<double> waveform;
+        double maxRms = 0;
+
+        for (int i = 0; i < numberOfSamples_; i++) {
+            int64_t start = static_cast<int64_t>(i) * totalSamples_ / numberOfSamples_;
+            if (start >= totalSamples_) break;
+            int64_t end = (std::min)(start + windowSize, totalSamples_);
+
+            double rms = std::sqrt(SumSquaresIn(start, end) /
+                                   static_cast<double>(end - start));
+            waveform.push_back(rms);
+            if (rms > maxRms) maxRms = rms;
+        }
+
+        // Samples are signed 16-bit PCM with range [-32768, 32767], so absolute
+        // mode divides by the max magnitude (32768) to keep the result inside
+        // [0.0, 1.0] even when a window is filled with -32768.
+        const bool useAbsolute = (normalization == "absolute");
+        std::vector<double> result;
+        result.reserve(static_cast<size_t>(numberOfSamples_));
+        for (double value : waveform) {
+            result.push_back(useAbsolute ? value / 32768.0
+                                         : ((maxRms > 0) ? value / maxRms : 0.0));
+        }
+        // Pad if the audio was shorter than the requested resolution.
+        result.resize(static_cast<size_t>(numberOfSamples_), 0.0);
+        return result;
+    }
+
+private:
+    static constexpr int64_t kBucketsPerWindow = 256;
+    static constexpr int64_t kMinBuckets = 1024;
+
+    /// Caps the accumulator at ~4 MB (one double plus one int64 per bucket).
+    static constexpr int64_t kMaxBuckets = 262144;
+
+    void Add(int16_t sample) {
+        if (bucketCount_ == 0 || counts_[bucketCount_ - 1] >= samplesPerBucket_) {
+            if (bucketCount_ == counts_.size()) MergeAdjacentBuckets();
+            bucketCount_++;
+            sumSquares_[bucketCount_ - 1] = 0.0;
+            counts_[bucketCount_ - 1] = 0;
+        }
+        double value = static_cast<double>(sample);
+        sumSquares_[bucketCount_ - 1] += value * value;
+        counts_[bucketCount_ - 1]++;
+        totalSamples_++;
+    }
+
+    /// Halves the resolution so more samples fit in the same arrays.
+    void MergeAdjacentBuckets() {
+        size_t dst = 0;
+        for (size_t src = 0; src < bucketCount_; src += 2) {
+            sumSquares_[dst] = sumSquares_[src] + sumSquares_[src + 1];
+            counts_[dst] = counts_[src] + counts_[src + 1];
+            dst++;
+        }
+        bucketCount_ = dst;
+        samplesPerBucket_ *= 2;
+    }
+
+    /// Sum of squares over the sample range [start, end).
+    double SumSquaresIn(int64_t start, int64_t end) const {
+        double sum = 0;
+        // Every bucket but the last is full, so bucket b starts at
+        // b * samplesPerBucket_.
+        size_t bucket = static_cast<size_t>(start / samplesPerBucket_);
+        for (; bucket < bucketCount_; bucket++) {
+            int64_t bucketStart = static_cast<int64_t>(bucket) * samplesPerBucket_;
+            if (bucketStart >= end) break;
+            int64_t bucketEnd = bucketStart + counts_[bucket];
+            int64_t overlap =
+                (std::min)(end, bucketEnd) - (std::max)(start, bucketStart);
+            if (overlap <= 0) continue;
+            if (overlap >= counts_[bucket]) {
+                sum += sumSquares_[bucket];
+            } else {
+                // Partial overlap: assume the energy is spread evenly across
+                // the bucket.
+                sum += sumSquares_[bucket] * static_cast<double>(overlap) /
+                       static_cast<double>(counts_[bucket]);
+            }
+        }
+        return sum;
+    }
+
+    int numberOfSamples_;
+    std::vector<double> sumSquares_;
+    std::vector<int64_t> counts_;
+
+    /// Number of samples each full bucket covers; doubles on every merge.
+    int64_t samplesPerBucket_ = 1;
+    size_t bucketCount_ = 0;
+    int64_t totalSamples_ = 0;
+    uint8_t pendingByte_ = 0;
+    bool hasPendingByte_ = false;
+};
+
 namespace audio_decoder {
 
 void AudioDecoderPlugin::RegisterWithRegistrar(
@@ -455,7 +764,8 @@ AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::DecodeToPcmStream(
     const std::string& inputPath,
     const std::function<void(const uint8_t*, size_t)>& onChunk,
     int64_t startMs, int64_t endMs,
-    int targetSampleRate, int targetChannels, int targetBitDepth) {
+    int targetSampleRate, int targetChannels, int targetBitDepth,
+    const std::function<void(const PcmInfo&)>& onFormat) {
 
     MFSession session;
     if (!session.IsInitialized()) {
@@ -516,6 +826,20 @@ AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::DecodeToPcmStream(
     pOutputType->GetUINT32(MF_MT_AUDIO_NUM_CHANNELS, &channels);
     pOutputType->GetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, &bitsPerSample);
     pOutputType->Release();
+
+    PcmInfo info{};
+    info.sampleRate = sampleRate;
+    info.channels = channels;
+    info.bitsPerSample = bitsPerSample;
+
+    if (onFormat) {
+        try {
+            onFormat(info);
+        } catch (...) {
+            pReader->Release();
+            throw;
+        }
+    }
 
     // WMF ignores the AAC edit list, causing timestamps to overshoot chunk
     // boundaries. Instead, compute exact byte limits from the duration.
@@ -619,27 +943,7 @@ AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::DecodeToPcmStream(
     }
     pReader->Release();
 
-    PcmInfo info;
-    info.sampleRate = sampleRate;
-    info.channels = channels;
-    info.bitsPerSample = bitsPerSample;
     return info;
-}
-
-AudioDecoderPlugin::PcmResult AudioDecoderPlugin::DecodeToPcm(
-    const std::string& inputPath, int64_t startMs, int64_t endMs,
-    int targetSampleRate, int targetChannels, int targetBitDepth) {
-
-    PcmResult result{};
-    auto info = DecodeToPcmStream(inputPath,
-        [&](const uint8_t* data, size_t size) {
-            result.data.insert(result.data.end(), data, data + size);
-        },
-        startMs, endMs, targetSampleRate, targetChannels, targetBitDepth);
-    result.sampleRate = info.sampleRate;
-    result.channels = info.channels;
-    result.bitsPerSample = info.bitsPerSample;
-    return result;
 }
 
 AudioDecoderPlugin::PcmInfo AudioDecoderPlugin::StreamPcmToWav(
@@ -909,12 +1213,6 @@ std::string AudioDecoderPlugin::TrimAudio(
     const std::string& inputPath, const std::string& outputPath,
     int64_t startMs, int64_t endMs) {
 
-    auto pcm = DecodeToPcm(inputPath, startMs, endMs);
-
-    if (pcm.data.empty()) {
-        throw std::runtime_error("No audio data decoded from trim range");
-    }
-
     std::string ext = outputPath.substr(outputPath.find_last_of('.') + 1);
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) {
@@ -922,86 +1220,37 @@ std::string AudioDecoderPlugin::TrimAudio(
                    });
 
     if (ext == "m4a") {
-        // M4A trimming uses DecodeToPcm (full buffering) because
-        // IMFSinkWriter requires sample-by-sample feeding from PCM data
-        // which cannot easily be streamed from DecodeToPcmStream.
+        // The trimmed PCM is fed to the sink writer chunk by chunk while the
+        // source reader is still decoding, so trimming hours of audio costs no
+        // more memory than trimming seconds (#49).
         MFSession session;
         if (!session.IsInitialized()) {
             throw std::runtime_error("Failed to initialize Media Foundation");
         }
 
-        std::wstring wOutputPath = Utf8ToWide(outputPath);
-        DeleteFileW(wOutputPath.c_str());
-
-        IMFSinkWriter* pWriter = nullptr;
-        HRESULT hr = MFCreateSinkWriterFromURL(wOutputPath.c_str(), nullptr, nullptr, &pWriter);
-        if (FAILED(hr)) {
-            throw std::runtime_error("Failed to create sink writer");
+        M4aStreamWriter writer(outputPath);
+        int64_t bytesWritten = 0;
+        try {
+            DecodeToPcmStream(inputPath,
+                [&](const uint8_t* data, size_t size) {
+                    writer.WriteChunk(data, size);
+                    bytesWritten += static_cast<int64_t>(size);
+                },
+                startMs, endMs, -1, -1, -1,
+                [&](const PcmInfo& info) {
+                    writer.Begin(info.sampleRate, info.channels);
+                });
+        } catch (...) {
+            writer.Abort();
+            throw;
         }
 
-        IMFMediaType* pAacType = nullptr;
-        MFCreateMediaType(&pAacType);
-        pAacType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        pAacType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_AAC);
-        pAacType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, pcm.sampleRate);
-        pAacType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, pcm.channels);
-        pAacType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        pAacType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 128000 / 8);
-
-        DWORD streamIndex = 0;
-        hr = pWriter->AddStream(pAacType, &streamIndex);
-        pAacType->Release();
-        if (FAILED(hr)) { pWriter->Release(); throw std::runtime_error("Failed to add AAC stream"); }
-
-        IMFMediaType* pInputType = nullptr;
-        MFCreateMediaType(&pInputType);
-        pInputType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
-        pInputType->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM);
-        pInputType->SetUINT32(MF_MT_AUDIO_SAMPLES_PER_SECOND, pcm.sampleRate);
-        pInputType->SetUINT32(MF_MT_AUDIO_NUM_CHANNELS, pcm.channels);
-        pInputType->SetUINT32(MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-        pInputType->SetUINT32(MF_MT_AUDIO_BLOCK_ALIGNMENT, pcm.channels * 2);
-        pInputType->SetUINT32(MF_MT_AUDIO_AVG_BYTES_PER_SECOND, pcm.sampleRate * pcm.channels * 2);
-
-        hr = pWriter->SetInputMediaType(streamIndex, pInputType, nullptr);
-        pInputType->Release();
-        if (FAILED(hr)) { pWriter->Release(); throw std::runtime_error("Failed to set input type"); }
-
-        hr = pWriter->BeginWriting();
-        if (FAILED(hr)) { pWriter->Release(); throw std::runtime_error("Failed to begin writing"); }
-
-        DWORD blockAlign = pcm.channels * 2;
-        DWORD chunkSize = pcm.sampleRate * blockAlign;
-        LONGLONG timestamp = 0;
-
-        for (size_t offset = 0; offset < pcm.data.size(); offset += chunkSize) {
-            DWORD thisChunk = static_cast<DWORD>(
-                (std::min)(static_cast<size_t>(chunkSize), pcm.data.size() - offset));
-
-            IMFMediaBuffer* pBuffer = nullptr;
-            MFCreateMemoryBuffer(thisChunk, &pBuffer);
-            BYTE* pBufData = nullptr;
-            pBuffer->Lock(&pBufData, nullptr, nullptr);
-            memcpy(pBufData, pcm.data.data() + offset, thisChunk);
-            pBuffer->Unlock();
-            pBuffer->SetCurrentLength(thisChunk);
-
-            IMFSample* pSample = nullptr;
-            MFCreateSample(&pSample);
-            pSample->AddBuffer(pBuffer);
-            pSample->SetSampleTime(timestamp);
-            LONGLONG duration = (LONGLONG)thisChunk * kHnsPerSec / (pcm.sampleRate * blockAlign);
-            pSample->SetSampleDuration(duration);
-
-            pWriter->WriteSample(streamIndex, pSample);
-            timestamp += duration;
-
-            pSample->Release();
-            pBuffer->Release();
+        if (bytesWritten == 0) {
+            writer.Abort();
+            throw std::runtime_error("No audio data decoded from trim range");
         }
 
-        pWriter->Finalize();
-        pWriter->Release();
+        writer.Finish();
     } else {
         StreamPcmToWav(inputPath, outputPath, startMs, endMs);
     }
@@ -1014,63 +1263,23 @@ flutter::EncodableList AudioDecoderPlugin::GetWaveform(
     const std::string& normalization) {
 
     // Fail fast on an invalid normalization mode before doing the expensive
-    // DecodeToPcm + RMS work below.
+    // decode + RMS work below.
     if (normalization != "perFile" && normalization != "absolute") {
         throw std::invalid_argument(
             "Unknown waveform normalization: " + normalization);
     }
 
-    auto pcm = DecodeToPcm(path);
+    // RMS energy is folded into the accumulator while decoding, so the whole
+    // track never has to be held in memory (#49).
+    WaveformAccumulator accumulator(numberOfSamples);
+    DecodeToPcmStream(path, [&](const uint8_t* data, size_t size) {
+        accumulator.AddPcm(data, size);
+    });
 
-    if (pcm.data.empty()) {
-        flutter::EncodableList result;
-        for (int i = 0; i < numberOfSamples; i++) {
-            result.push_back(flutter::EncodableValue(0.0));
-        }
-        return result;
-    }
-
-    const int16_t* samples = reinterpret_cast<const int16_t*>(pcm.data.data());
-    size_t totalSamples = pcm.data.size() / 2;
-    size_t samplesPerWindow = (std::max)(static_cast<size_t>(1), totalSamples / numberOfSamples);
-
-    std::vector<double> waveform;
-    double maxRms = 0;
-
-    for (int i = 0; i < numberOfSamples; i++) {
-        size_t start = static_cast<size_t>(i) * totalSamples / numberOfSamples;
-        size_t end = (std::min)(start + samplesPerWindow, totalSamples);
-        if (start >= totalSamples) break;
-
-        double sumSquares = 0;
-        for (size_t j = start; j < end; j++) {
-            double s = static_cast<double>(samples[j]);
-            sumSquares += s * s;
-        }
-        double rms = std::sqrt(sumSquares / (end - start));
-        waveform.push_back(rms);
-        if (rms > maxRms) maxRms = rms;
-    }
-
-    // Samples are signed 16-bit PCM with range [-32768, 32767], so absolute
-    // mode divides by the max magnitude (32768) to keep the result inside
-    // [0.0, 1.0] even when a window is filled with -32768.
-    const bool useAbsolute = (normalization == "absolute");
     flutter::EncodableList result;
-    for (size_t i = 0; i < waveform.size(); i++) {
-        double scaled;
-        if (useAbsolute) {
-            scaled = waveform[i] / 32768.0;
-        } else {
-            scaled = (maxRms > 0) ? waveform[i] / maxRms : 0.0;
-        }
-        result.push_back(flutter::EncodableValue(scaled));
+    for (double value : accumulator.Build(normalization)) {
+        result.push_back(flutter::EncodableValue(value));
     }
-
-    while (static_cast<int>(result.size()) < numberOfSamples) {
-        result.push_back(flutter::EncodableValue(0.0));
-    }
-
     return result;
 }
 
