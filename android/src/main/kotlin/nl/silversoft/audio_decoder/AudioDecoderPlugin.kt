@@ -12,10 +12,9 @@ import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
 import android.media.MediaCodecInfo
 import android.media.MediaMuxer
-import java.io.ByteArrayOutputStream
 import android.content.Context
+import java.io.Closeable
 import java.io.File
-import java.io.FileOutputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -38,6 +37,9 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         /// Maximum supported target sample rate (384 kHz covers all standard
         /// audio formats including DXD and high-resolution PCM).
         private const val MAX_SAMPLE_RATE = 384_000
+
+        /// Timeout for MediaCodec buffer dequeue calls.
+        private const val CODEC_TIMEOUT_US = 10_000L
     }
 
     private lateinit var channel: MethodChannel
@@ -577,80 +579,177 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
 
     // endregion
 
+    // region PCM streaming
+
+    /**
+     * Pull-based source of decoded 16-bit PCM.
+     *
+     * Consumers request one chunk at a time so a track never has to be held in
+     * memory as a whole: three hours of 44.1 kHz stereo audio decodes to roughly
+     * 1.9 GB of PCM, far beyond the per-app heap limit on Android.
+     */
+    private interface PcmSource {
+        /** The next PCM chunk, or `null` once the stream is exhausted. */
+        fun next(): ByteArray?
+    }
+
+    /**
+     * Decodes an audio track on demand with [MediaCodec].
+     *
+     * Each [next] call runs the codec loop just far enough to produce one output
+     * chunk, so the decoder stays one buffer ahead of its consumer instead of
+     * collecting every chunk up front. When [timeRangeUs] is set, only samples
+     * whose presentation time falls inside the range are emitted and input
+     * feeding stops as soon as the extractor passes the end of the range.
+     */
+    private class PcmDecoder(
+        private val track: AudioTrackInfo,
+        private val timeRangeUs: LongRange? = null,
+    ) : PcmSource, Closeable {
+        val sampleRate: Int get() = track.sampleRate
+        val channelCount: Int get() = track.channelCount
+
+        private val decoder = MediaCodec.createDecoderByType(track.mime)
+        private val bufferInfo = MediaCodec.BufferInfo()
+        private var inputDone = false
+        private var outputDone = false
+        private var released = false
+
+        init {
+            // A throwing initializer leaves the instance unconstructed, so
+            // neither close() nor use {} would ever run: release the codec here
+            // or its native resources leak.
+            try {
+                if (timeRangeUs != null && timeRangeUs.first > 0) {
+                    track.extractor.seekTo(timeRangeUs.first, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                }
+                decoder.configure(track.format, null, null, 0)
+                decoder.start()
+            } catch (e: Exception) {
+                decoder.release()
+                throw e
+            }
+        }
+
+        override fun next(): ByteArray? {
+            while (!outputDone) {
+                if (!inputDone) {
+                    val idx = decoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                    if (idx >= 0) {
+                        val buf = decoder.getInputBuffer(idx)!!
+                        val size = track.extractor.readSampleData(buf, 0)
+                        val sampleTime = track.extractor.sampleTime
+                        val pastRange = timeRangeUs != null && sampleTime > timeRangeUs.last
+                        if (size < 0 || pastRange) {
+                            decoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            inputDone = true
+                        } else {
+                            decoder.queueInputBuffer(idx, 0, size, sampleTime, 0)
+                            track.extractor.advance()
+                        }
+                    }
+                }
+
+                val idx = decoder.dequeueOutputBuffer(bufferInfo, CODEC_TIMEOUT_US)
+                if (idx >= 0) {
+                    if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        outputDone = true
+                    }
+                    val inRange = timeRangeUs == null || bufferInfo.presentationTimeUs in timeRangeUs
+                    var chunk: ByteArray? = null
+                    if (bufferInfo.size > 0 && inRange) {
+                        val buf = decoder.getOutputBuffer(idx)!!
+                        buf.position(bufferInfo.offset)
+                        buf.limit(bufferInfo.offset + bufferInfo.size)
+                        chunk = ByteArray(bufferInfo.size)
+                        buf.get(chunk)
+                    }
+                    decoder.releaseOutputBuffer(idx, false)
+                    if (chunk != null) return chunk
+                }
+            }
+            return null
+        }
+
+        override fun close() {
+            if (released) return
+            released = true
+            try { decoder.stop() } catch (_: IllegalStateException) {}
+            decoder.release()
+            track.extractor.release()
+        }
+    }
+
+    /**
+     * Opens a [PcmDecoder] for [inputPath] and releases both the codec and the
+     * extractor when [block] returns or throws.
+     */
+    private inline fun <T> withPcmSource(
+        inputPath: String,
+        timeRangeUs: LongRange? = null,
+        block: (PcmDecoder) -> T,
+    ): T {
+        val track = extractAudioTrack(inputPath)
+        val decoder = try {
+            PcmDecoder(track, timeRangeUs)
+        } catch (e: Exception) {
+            track.extractor.release()
+            throw e
+        }
+        return decoder.use(block)
+    }
+
+    /**
+     * Streams every chunk of [source] into a RIFF/WAV file at [outputPath],
+     * patching the header with the final data size once the stream ends.
+     */
+    private fun streamPcmToWav(
+        source: PcmSource,
+        outputPath: String,
+        sampleRate: Int,
+        channelCount: Int,
+        bitsPerSample: Int,
+    ) {
+        val outputFile = File(outputPath)
+        outputFile.delete()
+        try {
+            RandomAccessFile(outputFile, "rw").use { raf ->
+                // Placeholder header; rewritten below with the actual data size.
+                raf.write(buildWavHeader(0, sampleRate, channelCount, bitsPerSample))
+
+                var totalPcmBytes = 0L
+                while (true) {
+                    val chunk = source.next() ?: break
+                    raf.write(chunk)
+                    totalPcmBytes += chunk.size
+                    if (totalPcmBytes > MAX_WAV_DATA_SIZE) {
+                        throw Exception("WAV output exceeds maximum size (~4 GB). Consider splitting the audio into shorter segments.")
+                    }
+                }
+
+                // The toInt() cast is safe: totalPcmBytes is validated against
+                // MAX_WAV_DATA_SIZE, so the bit pattern is a valid uint32 value
+                // that ByteBuffer.putInt writes correctly in little-endian.
+                raf.seek(0)
+                raf.write(buildWavHeader(totalPcmBytes.toInt(), sampleRate, channelCount, bitsPerSample))
+            }
+        } catch (e: Exception) {
+            outputFile.delete()
+            throw e
+        }
+    }
+
+    // endregion
+
     // region Convert to M4A
 
     private fun performM4aConversion(inputPath: String, outputPath: String) {
-        // Step 1: Decode input to PCM
-        val extractor = MediaExtractor()
-        extractor.setDataSource(inputPath)
-
-        var audioTrackIndex = -1
-        var format: MediaFormat? = null
-        for (i in 0 until extractor.trackCount) {
-            val trackFormat = extractor.getTrackFormat(i)
-            val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: ""
-            if (mime.startsWith("audio/")) {
-                audioTrackIndex = i
-                format = trackFormat
-                break
-            }
+        // Decoding and encoding are interleaved: each PCM chunk is handed to the
+        // AAC encoder as soon as it comes out of the decoder, so peak memory
+        // stays independent of the audio duration.
+        withPcmSource(inputPath) { source ->
+            encodePcmToM4a(source, outputPath, source.sampleRate, source.channelCount)
         }
-        if (audioTrackIndex == -1 || format == null) {
-            extractor.release()
-            throw Exception("No audio track found in $inputPath")
-        }
-
-        extractor.selectTrack(audioTrackIndex)
-
-        val mime = format.getString(MediaFormat.KEY_MIME)!!
-        val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
-
-        val decoder = MediaCodec.createDecoderByType(mime)
-        decoder.configure(format, null, null, 0)
-        decoder.start()
-
-        val pcmChunks = mutableListOf<ByteArray>()
-        val bufferInfo = MediaCodec.BufferInfo()
-        var inputDone = false
-        var outputDone = false
-        val timeoutUs = 10_000L
-
-        while (!outputDone) {
-            if (!inputDone) {
-                val idx = decoder.dequeueInputBuffer(timeoutUs)
-                if (idx >= 0) {
-                    val buf = decoder.getInputBuffer(idx)!!
-                    val size = extractor.readSampleData(buf, 0)
-                    if (size < 0) {
-                        decoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        inputDone = true
-                    } else {
-                        decoder.queueInputBuffer(idx, 0, size, extractor.sampleTime, 0)
-                        extractor.advance()
-                    }
-                }
-            }
-            val idx = decoder.dequeueOutputBuffer(bufferInfo, timeoutUs)
-            if (idx >= 0) {
-                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                    outputDone = true
-                }
-                if (bufferInfo.size > 0) {
-                    val buf = decoder.getOutputBuffer(idx)!!
-                    val chunk = ByteArray(bufferInfo.size)
-                    buf.get(chunk)
-                    pcmChunks.add(chunk)
-                }
-                decoder.releaseOutputBuffer(idx, false)
-            }
-        }
-        decoder.stop()
-        decoder.release()
-        extractor.release()
-
-        // Step 2: Encode PCM to AAC and mux into M4A
-        encodePcmToM4a(pcmChunks, outputPath, sampleRate, channelCount)
     }
 
     // endregion
@@ -723,99 +822,18 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
     // region Trim Audio
 
     private fun performTrimAudio(inputPath: String, outputPath: String, startMs: Long, endMs: Long) {
-        val extractor = MediaExtractor()
-        extractor.setDataSource(inputPath)
-
-        var audioTrackIndex = -1
-        var format: MediaFormat? = null
-        for (i in 0 until extractor.trackCount) {
-            val trackFormat = extractor.getTrackFormat(i)
-            val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: ""
-            if (mime.startsWith("audio/")) {
-                audioTrackIndex = i
-                format = trackFormat
-                break
-            }
-        }
-        if (audioTrackIndex == -1 || format == null) {
-            extractor.release()
-            throw Exception("No audio track found in $inputPath")
-        }
-
-        extractor.selectTrack(audioTrackIndex)
-
-        val mime = format.getString(MediaFormat.KEY_MIME)!!
-        val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-        val channelCount = format.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
         val bitsPerSample = 16
-
-        val startUs = startMs * 1000
-        val endUs = endMs * 1000
-
-        // Seek to start position
-        extractor.seekTo(startUs, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-
-        val decoder = MediaCodec.createDecoderByType(mime)
-        decoder.configure(format, null, null, 0)
-        decoder.start()
-
-        val pcmChunks = mutableListOf<ByteArray>()
-        val bufferInfo = MediaCodec.BufferInfo()
-        var inputDone = false
-        var outputDone = false
-        val timeoutUs = 10_000L
-
-        while (!outputDone) {
-            if (!inputDone) {
-                val idx = decoder.dequeueInputBuffer(timeoutUs)
-                if (idx >= 0) {
-                    val buf = decoder.getInputBuffer(idx)!!
-                    val sampleSize = extractor.readSampleData(buf, 0)
-                    val sampleTime = extractor.sampleTime
-                    if (sampleSize < 0 || sampleTime > endUs) {
-                        decoder.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        inputDone = true
-                    } else {
-                        decoder.queueInputBuffer(idx, 0, sampleSize, sampleTime, 0)
-                        extractor.advance()
-                    }
-                }
-            }
-            val idx = decoder.dequeueOutputBuffer(bufferInfo, timeoutUs)
-            if (idx >= 0) {
-                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                    outputDone = true
-                }
-                if (bufferInfo.size > 0) {
-                    // Filter samples by time range
-                    val ts = bufferInfo.presentationTimeUs
-                    if (ts >= startUs && ts < endUs) {
-                        val buf = decoder.getOutputBuffer(idx)!!
-                        val chunk = ByteArray(bufferInfo.size)
-                        buf.get(chunk)
-                        pcmChunks.add(chunk)
-                    }
-                }
-                decoder.releaseOutputBuffer(idx, false)
-            }
-        }
-        decoder.stop()
-        decoder.release()
-        extractor.release()
-
+        val timeRangeUs = (startMs * 1000) until (endMs * 1000)
         val outputExt = outputPath.substringAfterLast('.').lowercase()
-        if (outputExt == "m4a") {
-            encodePcmToM4a(pcmChunks, outputPath, sampleRate, channelCount)
-        } else {
-            // Write WAV
-            val pcmOutput = ByteArrayOutputStream()
-            for (chunk in pcmChunks) {
-                pcmOutput.write(chunk)
-            }
-            val pcmData = pcmOutput.toByteArray()
-            FileOutputStream(File(outputPath)).use { fos ->
-                fos.write(buildWavHeader(pcmData.size, sampleRate, channelCount, bitsPerSample))
-                fos.write(pcmData)
+
+        // The trimmed range is streamed straight to the encoder or to disk; a
+        // trim that spans hours of audio therefore costs no more memory than a
+        // trim of a few seconds.
+        withPcmSource(inputPath, timeRangeUs) { source ->
+            if (outputExt == "m4a") {
+                encodePcmToM4a(source, outputPath, source.sampleRate, source.channelCount)
+            } else {
+                streamPcmToWav(source, outputPath, source.sampleRate, source.channelCount, bitsPerSample)
             }
         }
     }
@@ -837,135 +855,200 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
             )
         }
 
-        val extractor = MediaExtractor()
-        extractor.setDataSource(path)
-
-        var audioTrackIndex = -1
-        var format: MediaFormat? = null
-        for (i in 0 until extractor.trackCount) {
-            val trackFormat = extractor.getTrackFormat(i)
-            val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: ""
-            if (mime.startsWith("audio/")) {
-                audioTrackIndex = i
-                format = trackFormat
-                break
+        val accumulator = WaveformAccumulator(numberOfSamples)
+        withPcmSource(path) { source ->
+            while (true) {
+                val chunk = source.next() ?: break
+                accumulator.addPcm(chunk)
             }
         }
-        if (audioTrackIndex == -1 || format == null) {
-            extractor.release()
-            throw Exception("No audio track found in $path")
-        }
-
-        extractor.selectTrack(audioTrackIndex)
-
-        val mime = format.getString(MediaFormat.KEY_MIME)!!
-        val codec = MediaCodec.createDecoderByType(mime)
-        codec.configure(format, null, null, 0)
-        codec.start()
-
-        val allSamples = mutableListOf<Short>()
-        val bufferInfo = MediaCodec.BufferInfo()
-        var inputDone = false
-        var outputDone = false
-        val timeoutUs = 10_000L
-
-        while (!outputDone) {
-            if (!inputDone) {
-                val idx = codec.dequeueInputBuffer(timeoutUs)
-                if (idx >= 0) {
-                    val buf = codec.getInputBuffer(idx)!!
-                    val size = extractor.readSampleData(buf, 0)
-                    if (size < 0) {
-                        codec.queueInputBuffer(idx, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        inputDone = true
-                    } else {
-                        codec.queueInputBuffer(idx, 0, size, extractor.sampleTime, 0)
-                        extractor.advance()
-                    }
-                }
-            }
-            val idx = codec.dequeueOutputBuffer(bufferInfo, timeoutUs)
-            if (idx >= 0) {
-                if (bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                    outputDone = true
-                }
-                if (bufferInfo.size > 0) {
-                    val buf = codec.getOutputBuffer(idx)!!
-                    val shortBuf = buf.order(ByteOrder.LITTLE_ENDIAN).asShortBuffer()
-                    val samples = ShortArray(bufferInfo.size / 2)
-                    shortBuf.get(samples)
-                    for (s in samples) {
-                        allSamples.add(s)
-                    }
-                }
-                codec.releaseOutputBuffer(idx, false)
-            }
-        }
-        codec.stop()
-        codec.release()
-        extractor.release()
-
-        return computeWaveform(allSamples.toShortArray(), numberOfSamples, normalization)
+        return accumulator.build(normalization)
     }
 
     /**
      * Reduces decoded 16-bit PCM [samples] to a normalized RMS waveform of
-     * [numberOfSamples] points.
-     *
-     * The window bounds are computed with 64-bit arithmetic on purpose: for
-     * longer files the product `i * totalSamples` easily exceeds Int.MAX_VALUE,
-     * which would silently overflow to a negative offset and crash with an
-     * IndexOutOfBoundsException. The caller is expected to validate
-     * [normalization] beforehand.
+     * [numberOfSamples] points. Thin wrapper around [WaveformAccumulator] for
+     * callers that already hold the full sample array.
      */
     internal fun computeWaveform(
         samples: ShortArray,
         numberOfSamples: Int,
         normalization: String = "perFile",
     ): List<Double> {
-        if (samples.isEmpty()) {
-            return List(numberOfSamples) { 0.0 }
+        val accumulator = WaveformAccumulator(numberOfSamples)
+        accumulator.addSamples(samples, samples.size)
+        return accumulator.build(normalization)
+    }
+
+    /**
+     * Accumulates RMS energy for a waveform while the audio is still decoding.
+     *
+     * Holding every decoded sample is not an option — three hours of 44.1 kHz
+     * stereo audio is close to a billion samples — so energy is folded into a
+     * fixed set of buckets instead. Each bucket covers [samplesPerBucket]
+     * consecutive samples; once the array is full, adjacent buckets are merged
+     * pairwise and the span per bucket doubles. Memory therefore stays bounded
+     * regardless of duration, while short inputs (which never trigger a merge)
+     * are summarized sample-exact.
+     *
+     * The window bounds in [build] are computed with 64-bit arithmetic on
+     * purpose: for longer files the product `i * totalSamples` easily exceeds
+     * Int.MAX_VALUE, which would silently overflow to a negative offset (#45).
+     * The caller is expected to validate the normalization mode beforehand.
+     */
+    internal class WaveformAccumulator(private val numberOfSamples: Int) {
+        private val sumSquares: DoubleArray
+        private val counts: LongArray
+
+        /** Number of samples each full bucket covers; doubles on every merge. */
+        private var samplesPerBucket = 1L
+        private var bucketCount = 0
+        private var totalSamples = 0L
+        private var pendingByte: Byte = 0
+        private var hasPendingByte = false
+
+        init {
+            // Aim for BUCKETS_PER_WINDOW buckets per output point so window
+            // bounds land close to a bucket edge, keeping the RMS error
+            // negligible once merging kicks in.
+            val target = numberOfSamples.toLong() * BUCKETS_PER_WINDOW
+            val capacity = target.coerceIn(MIN_BUCKETS, MAX_BUCKETS).toInt()
+            // An even capacity keeps pairwise merging exact.
+            val evenCapacity = capacity + (capacity % 2)
+            sumSquares = DoubleArray(evenCapacity)
+            counts = LongArray(evenCapacity)
         }
 
-        // Compute RMS per window
-        val totalSamples = samples.size
-        val windowSize = max(1, totalSamples / numberOfSamples)
-        val waveform = mutableListOf<Double>()
-        var maxRms = 0.0
-
-        for (i in 0 until numberOfSamples) {
-            val start = (i.toLong() * totalSamples / numberOfSamples).toInt()
-            if (start >= totalSamples) break
-            val end = min(start + windowSize, totalSamples)
-
-            var sumSquares = 0.0
-            for (j in start until end) {
-                val sample = samples[j].toDouble()
-                sumSquares += sample * sample
+        /**
+         * Adds a chunk of interleaved little-endian 16-bit PCM. A sample split
+         * across two chunks is carried over instead of dropped.
+         */
+        fun addPcm(chunk: ByteArray) {
+            var offset = 0
+            if (hasPendingByte && chunk.isNotEmpty()) {
+                add(littleEndianShort(pendingByte, chunk[0]))
+                hasPendingByte = false
+                offset = 1
             }
-            val rms = sqrt(sumSquares / (end - start))
-            waveform.add(rms)
-            if (rms > maxRms) maxRms = rms
+            while (offset + 1 < chunk.size) {
+                add(littleEndianShort(chunk[offset], chunk[offset + 1]))
+                offset += 2
+            }
+            if (offset < chunk.size) {
+                pendingByte = chunk[offset]
+                hasPendingByte = true
+            }
         }
 
-        // Scale to 0.0-1.0 according to the requested normalization mode.
-        // Samples are signed 16-bit PCM with range [-32768, 32767], so the
-        // absolute mode divides by the max magnitude (32768) to keep the
-        // result inside [0.0, 1.0] even when a window is filled with -32768.
-        // (normalization is already validated up front.)
-        val normalized = if (normalization == "absolute") {
-            waveform.map { it / 32768.0 }
-        } else if (maxRms > 0) {
-            waveform.map { it / maxRms }
-        } else {
-            waveform
+        private fun littleEndianShort(low: Byte, high: Byte): Short =
+            (((high.toInt() and 0xFF) shl 8) or (low.toInt() and 0xFF)).toShort()
+
+        /** Adds the first [count] samples of [samples]. */
+        fun addSamples(samples: ShortArray, count: Int) {
+            for (i in 0 until count) {
+                add(samples[i])
+            }
         }
 
-        // Pad if needed
-        return if (normalized.size < numberOfSamples) {
-            normalized + List(numberOfSamples - normalized.size) { 0.0 }
-        } else {
-            normalized
+        private fun add(sample: Short) {
+            if (bucketCount == 0 || counts[bucketCount - 1] >= samplesPerBucket) {
+                if (bucketCount == counts.size) mergeAdjacentBuckets()
+                bucketCount++
+                sumSquares[bucketCount - 1] = 0.0
+                counts[bucketCount - 1] = 0L
+            }
+            val value = sample.toDouble()
+            sumSquares[bucketCount - 1] += value * value
+            counts[bucketCount - 1]++
+            totalSamples++
+        }
+
+        /** Halves the resolution so more samples fit in the same arrays. */
+        private fun mergeAdjacentBuckets() {
+            var dst = 0
+            var src = 0
+            while (src < bucketCount) {
+                sumSquares[dst] = sumSquares[src] + sumSquares[src + 1]
+                counts[dst] = counts[src] + counts[src + 1]
+                dst++
+                src += 2
+            }
+            bucketCount = dst
+            samplesPerBucket *= 2
+        }
+
+        /** Sum of squares over the sample range `[start, end)`. */
+        private fun sumSquaresIn(start: Long, end: Long): Double {
+            var sum = 0.0
+            // Every bucket but the last is full, so bucket b starts at
+            // b * samplesPerBucket.
+            var bucket = (start / samplesPerBucket).toInt()
+            while (bucket < bucketCount) {
+                val bucketStart = bucket.toLong() * samplesPerBucket
+                if (bucketStart >= end) break
+                val bucketEnd = bucketStart + counts[bucket]
+                val overlap = min(end, bucketEnd) - max(start, bucketStart)
+                if (overlap > 0) {
+                    sum += if (overlap >= counts[bucket]) {
+                        sumSquares[bucket]
+                    } else {
+                        // Partial overlap: assume the energy is spread evenly
+                        // across the bucket.
+                        sumSquares[bucket] * overlap / counts[bucket]
+                    }
+                }
+                bucket++
+            }
+            return sum
+        }
+
+        /** Builds the normalized waveform from everything accumulated so far. */
+        fun build(normalization: String): List<Double> {
+            if (totalSamples == 0L) {
+                return List(numberOfSamples) { 0.0 }
+            }
+
+            val windowSize = max(1L, totalSamples / numberOfSamples)
+            val waveform = mutableListOf<Double>()
+            var maxRms = 0.0
+
+            for (i in 0 until numberOfSamples) {
+                val start = i.toLong() * totalSamples / numberOfSamples
+                if (start >= totalSamples) break
+                val end = min(start + windowSize, totalSamples)
+
+                val rms = sqrt(sumSquaresIn(start, end) / (end - start))
+                waveform.add(rms)
+                if (rms > maxRms) maxRms = rms
+            }
+
+            // Scale to 0.0-1.0 according to the requested normalization mode.
+            // Samples are signed 16-bit PCM with range [-32768, 32767], so the
+            // absolute mode divides by the max magnitude (32768) to keep the
+            // result inside [0.0, 1.0] even when a window is filled with -32768.
+            // (normalization is already validated up front.)
+            val normalized = if (normalization == "absolute") {
+                waveform.map { it / 32768.0 }
+            } else if (maxRms > 0) {
+                waveform.map { it / maxRms }
+            } else {
+                waveform
+            }
+
+            // Pad if needed
+            return if (normalized.size < numberOfSamples) {
+                normalized + List(numberOfSamples - normalized.size) { 0.0 }
+            } else {
+                normalized
+            }
+        }
+
+        private companion object {
+            const val BUCKETS_PER_WINDOW = 256L
+            const val MIN_BUCKETS = 1024L
+
+            /// Caps the accumulator at ~4 MB (one Double plus one Long per bucket).
+            const val MAX_BUCKETS = 262_144L
         }
     }
 
@@ -973,7 +1056,15 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
 
     // region M4A encoding helper
 
-    private fun encodePcmToM4a(pcmChunks: List<ByteArray>, outputPath: String, sampleRate: Int, channelCount: Int) {
+    /**
+     * Encodes the PCM delivered by [source] to AAC and muxes it into an M4A
+     * file at [outputPath].
+     *
+     * Chunks are pulled from [source] one at a time while the encoder drains, so
+     * only the chunk currently being copied into an input buffer is held in
+     * memory (#49).
+     */
+    private fun encodePcmToM4a(source: PcmSource, outputPath: String, sampleRate: Int, channelCount: Int) {
         val outputFile = File(outputPath)
         if (outputFile.exists()) outputFile.delete()
 
@@ -983,75 +1074,99 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         encoderFormat.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
 
         val encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
-        encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
-        encoder.start()
+        val muxer: MediaMuxer
+        try {
+            encoder.configure(encoderFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            encoder.start()
+            muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+        } catch (e: Exception) {
+            encoder.release()
+            outputFile.delete()
+            throw e
+        }
 
-        val muxer = MediaMuxer(outputPath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
         var muxerTrackIndex = -1
         var muxerStarted = false
 
         val encBufferInfo = MediaCodec.BufferInfo()
-        var pcmOffset = 0
-        var chunkIndex = 0
+        var currentChunk: ByteArray? = source.next()
+        var chunkOffset = 0
         var encInputDone = false
         var encOutputDone = false
-        var presentationTimeUs = 0L
-        val bytesPerSample = 2 * channelCount
-        val timeoutUs = 10_000L
+        var framesEncoded = 0L
+        val bytesPerFrame = 2 * channelCount
 
-        while (!encOutputDone) {
-            if (!encInputDone) {
-                val idx = encoder.dequeueInputBuffer(timeoutUs)
-                if (idx >= 0) {
-                    val buf = encoder.getInputBuffer(idx)!!
-                    buf.clear()
-                    var written = 0
-                    while (chunkIndex < pcmChunks.size && written < buf.remaining()) {
-                        val chunk = pcmChunks[chunkIndex]
-                        val available = chunk.size - pcmOffset
-                        val toCopy = minOf(available, buf.remaining())
-                        buf.put(chunk, pcmOffset, toCopy)
-                        written += toCopy
-                        pcmOffset += toCopy
-                        if (pcmOffset >= chunk.size) {
-                            pcmOffset = 0
-                            chunkIndex++
+        try {
+            while (!encOutputDone) {
+                if (!encInputDone) {
+                    val idx = encoder.dequeueInputBuffer(CODEC_TIMEOUT_US)
+                    if (idx >= 0) {
+                        val buf = encoder.getInputBuffer(idx)!!
+                        buf.clear()
+                        // Fill whole frames only, so the frame count below stays
+                        // exact even when the buffer size is not a multiple of
+                        // the frame size (e.g. multi-channel audio). Buffers too
+                        // small for a single frame fall back to a plain fill.
+                        val alignedCapacity = (buf.remaining() / bytesPerFrame) * bytesPerFrame
+                        val limit = if (alignedCapacity > 0) alignedCapacity else buf.remaining()
+                        var written = 0
+                        while (written < limit) {
+                            val chunk = currentChunk ?: break
+                            val toCopy = minOf(chunk.size - chunkOffset, limit - written)
+                            buf.put(chunk, chunkOffset, toCopy)
+                            written += toCopy
+                            chunkOffset += toCopy
+                            if (chunkOffset >= chunk.size) {
+                                currentChunk = source.next()
+                                chunkOffset = 0
+                            }
+                        }
+                        // Derive the timestamp from the running frame count
+                        // instead of accumulating per-buffer deltas, which would
+                        // drift on long recordings.
+                        val presentationTimeUs = framesEncoded * 1_000_000L / sampleRate
+                        if (written == 0) {
+                            encoder.queueInputBuffer(idx, 0, 0, presentationTimeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+                            encInputDone = true
+                        } else {
+                            encoder.queueInputBuffer(idx, 0, written, presentationTimeUs, 0)
+                            framesEncoded += written / bytesPerFrame
                         }
                     }
-                    if (written == 0) {
-                        encoder.queueInputBuffer(idx, 0, 0, presentationTimeUs, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-                        encInputDone = true
-                    } else {
-                        encoder.queueInputBuffer(idx, 0, written, presentationTimeUs, 0)
-                        presentationTimeUs += (written.toLong() / bytesPerSample) * 1_000_000L / sampleRate
+                }
+                val idx = encoder.dequeueOutputBuffer(encBufferInfo, CODEC_TIMEOUT_US)
+                if (idx >= 0) {
+                    if (encBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+                        encOutputDone = true
                     }
+                    // Codec-specific data reaches the muxer through the output
+                    // format, so it must not be written as a sample.
+                    val isCodecConfig = encBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0
+                    if (encBufferInfo.size > 0 && muxerStarted && !isCodecConfig) {
+                        val buf = encoder.getOutputBuffer(idx)!!
+                        buf.position(encBufferInfo.offset)
+                        buf.limit(encBufferInfo.offset + encBufferInfo.size)
+                        muxer.writeSampleData(muxerTrackIndex, buf, encBufferInfo)
+                    }
+                    encoder.releaseOutputBuffer(idx, false)
+                } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    muxerTrackIndex = muxer.addTrack(encoder.outputFormat)
+                    muxer.start()
+                    muxerStarted = true
                 }
             }
-            val idx = encoder.dequeueOutputBuffer(encBufferInfo, timeoutUs)
-            if (idx >= 0) {
-                if (encBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
-                    encOutputDone = true
-                }
-                if (encBufferInfo.size > 0 && muxerStarted) {
-                    val buf = encoder.getOutputBuffer(idx)!!
-                    buf.position(encBufferInfo.offset)
-                    buf.limit(encBufferInfo.offset + encBufferInfo.size)
-                    muxer.writeSampleData(muxerTrackIndex, buf, encBufferInfo)
-                }
-                encoder.releaseOutputBuffer(idx, false)
-            } else if (idx == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                muxerTrackIndex = muxer.addTrack(encoder.outputFormat)
-                muxer.start()
-                muxerStarted = true
-            }
-        }
 
-        encoder.stop()
-        encoder.release()
-        if (muxerStarted) {
-            muxer.stop()
+            if (muxerStarted) {
+                muxer.stop()
+            }
+        } catch (e: Exception) {
+            outputFile.delete()
+            throw e
+        } finally {
+            try { encoder.stop() } catch (_: IllegalStateException) {}
+            encoder.release()
+            muxer.release()
         }
-        muxer.release()
     }
 
     // endregion

@@ -215,4 +215,52 @@ internal class AudioDecoderPluginTest {
         assertEquals(128, waveform.size)
         assertTrue(waveform.all { it > 0.99 && it <= 1.0 })
     }
+
+    @Test
+    fun waveformAccumulator_chunkedPcm_matchesSingleArray() {
+        // Regression for #49: the waveform is accumulated while decoding, so
+        // feeding the same signal in chunks must give the same result as
+        // handing over one array — including when a sample straddles a chunk
+        // boundary (odd chunk size).
+        val samples = ShortArray(5_000) { (it * 37 % 20_000 - 10_000).toShort() }
+        val pcm = ByteArray(samples.size * 2)
+        for (i in samples.indices) {
+            pcm[i * 2] = (samples[i].toInt() and 0xFF).toByte()
+            pcm[i * 2 + 1] = ((samples[i].toInt() shr 8) and 0xFF).toByte()
+        }
+
+        val chunked = AudioDecoderPlugin.WaveformAccumulator(100)
+        var offset = 0
+        val chunkSize = 777
+        while (offset < pcm.size) {
+            val size = minOf(chunkSize, pcm.size - offset)
+            chunked.addPcm(pcm.copyOfRange(offset, offset + size))
+            offset += size
+        }
+
+        val expected = AudioDecoderPlugin().computeWaveform(samples, 100, "perFile")
+        val actual = chunked.build("perFile")
+
+        assertEquals(expected.size, actual.size)
+        for (i in expected.indices) {
+            assertTrue(
+                kotlin.math.abs(expected[i] - actual[i]) < 1e-9,
+                "point $i: expected ${expected[i]}, got ${actual[i]}"
+            )
+        }
+    }
+
+    @Test
+    fun waveformAccumulator_moreSamplesThanBuckets_staysNormalized() {
+        // Well past the bucket capacity, so the accumulator merges buckets
+        // repeatedly. A constant signal must still come out flat and in range.
+        val accumulator = AudioDecoderPlugin.WaveformAccumulator(100)
+        val chunk = ShortArray(100_000) { 8_000 }
+        repeat(50) { accumulator.addSamples(chunk, chunk.size) }
+
+        val waveform = accumulator.build("absolute")
+
+        assertEquals(100, waveform.size)
+        assertTrue(waveform.all { kotlin.math.abs(it - 8_000.0 / 32_768.0) < 1e-6 })
+    }
 }

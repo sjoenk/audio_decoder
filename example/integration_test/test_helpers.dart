@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -40,6 +41,56 @@ Uint8List buildPcmWav({required int frameCount, int sampleRate = 44100}) {
     view.setInt16(44 + i * bytesPerSample, ((i * 137) % 65536) - 32768, Endian.little);
   }
   return bytes;
+}
+
+/// Write a synthetic mono 16-bit PCM WAV of [frameCount] frames to [path] in
+/// blocks, without ever holding the whole payload in memory.
+///
+/// Long-file tests need inputs of a few hundred megabytes; building those as a
+/// single [Uint8List] (like [buildPcmWav] does) would make the test itself run
+/// out of memory before it reaches the plugin.
+Future<void> writePcmWavFile({
+  required String path,
+  required int frameCount,
+  int sampleRate = 44100,
+  int framesPerBlock = 1 << 16,
+}) async {
+  const channels = 1;
+  const bytesPerSample = 2; // 16-bit
+  final dataSize = frameCount * channels * bytesPerSample;
+
+  final header = buildPcmWav(frameCount: 0, sampleRate: sampleRate);
+  ByteData.view(header.buffer).setUint32(4, 36 + dataSize, Endian.little);
+  ByteData.view(header.buffer).setUint32(40, dataSize, Endian.little);
+
+  final sink = File(path).openWrite();
+  try {
+    sink.add(header);
+
+    final block = Uint8List(framesPerBlock * bytesPerSample);
+    final blockView = ByteData.view(block.buffer);
+    var written = 0;
+    while (written < frameCount) {
+      final frames = (frameCount - written).clamp(0, framesPerBlock);
+      for (var i = 0; i < frames; i++) {
+        // Same sawtooth payload as buildPcmWav, so every window has a
+        // non-zero RMS.
+        blockView.setInt16(
+          i * bytesPerSample,
+          (((written + i) * 137) % 65536) - 32768,
+          Endian.little,
+        );
+      }
+      sink.add(Uint8List.sublistView(block, 0, frames * bytesPerSample));
+      // Flush before refilling `block`: the view above shares its bytes, and
+      // `add` queues without backpressure, so a large input would otherwise
+      // both pile up in the sink's buffer and risk being rewritten in place.
+      await sink.flush();
+      written += frames;
+    }
+  } finally {
+    await sink.close();
+  }
 }
 
 /// Validate the WAV header structure of [bytes] and return a map with

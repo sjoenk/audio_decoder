@@ -8,6 +8,11 @@ import 'package:audio_decoder/audio_decoder.dart';
 
 import 'test_helpers.dart';
 
+/// Length of the generated input for the long-file regression test (#49).
+/// Raise it with `--dart-define=AUDIO_DECODER_LONG_TEST_MINUTES=45` to push a
+/// device past the heap limit the old implementation ran into.
+const longTestMinutes = int.fromEnvironment('AUDIO_DECODER_LONG_TEST_MINUTES', defaultValue: 3);
+
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -16,7 +21,16 @@ void main() {
   late Directory tempDir;
 
   setUpAll(() {
-    tempDir = Directory.systemTemp.createTempSync('audio_decoder_test_');
+    if (Platform.isAndroid) {
+      // On Android `systemTemp` is the app's code_cache directory. Android
+      // clears cache directories (code_cache included) after a fresh install
+      // and whenever storage runs low, which makes files — and even the
+      // directory itself — disappear halfway through a run. The app's files
+      // directory is never cleared by the platform.
+      tempDir = Directory('${Directory.systemTemp.parent.path}/files/audio_decoder_test')..createSync(recursive: true);
+    } else {
+      tempDir = Directory.systemTemp.createTempSync('audio_decoder_test_');
+    }
   });
 
   tearDownAll(() {
@@ -218,6 +232,50 @@ void main() {
       final size = await outputFile.length();
       expect(size, greaterThan(0));
     });
+
+    testWidgets(
+      'long file converts without exhausting memory (regression #49)',
+      (
+        WidgetTester tester,
+      ) async {
+        // The decoder used to collect every PCM chunk before encoding started,
+        // so peak memory grew with the audio duration: three hours of 44.1 kHz
+        // stereo decodes to ~1.9 GB of PCM, well past the Android per-app heap
+        // limit. Decoding and encoding now run interleaved.
+        //
+        // The default of three minutes (~16 MB of PCM, thousands of chunks)
+        // keeps the suite fast and covers that a long chunk sequence streams
+        // through end to end, but it is small enough that the old
+        // buffer-everything implementation would pass it too. To actually
+        // reproduce the reported crash, raise the duration past the device's
+        // heap limit:
+        //
+        //   flutter test integration_test/plugin_integration_test.dart \
+        //     --dart-define=AUDIO_DECODER_LONG_TEST_MINUTES=45
+        //
+        // Expect that run to take roughly as long as the audio itself when the
+        // device falls back to a software codec.
+        final inputPath = '${tempDir.path}/long_tone_m4a_input.wav';
+        await writePcmWavFile(path: inputPath, frameCount: 44100 * 60 * longTestMinutes);
+        final outputPath = tempOutputPath('long_wav_to_m4a', 'm4a');
+
+        final result = await AudioDecoder.convertToM4a(inputPath, outputPath);
+
+        final outputFile = File(result);
+        expect(await outputFile.exists(), isTrue);
+        expect(await outputFile.length(), greaterThan(0));
+
+        final info = await AudioDecoder.getAudioInfo(result);
+        expect(
+          info.duration.inSeconds,
+          greaterThanOrEqualTo(longTestMinutes * 60 - 5),
+          reason: 'Encoded output should cover the full input duration',
+        );
+
+        await File(inputPath).delete();
+      },
+      timeout: Timeout(Duration(minutes: 5 + longTestMinutes * 3)),
+    );
   });
 
   // ── 4. getAudioInfo ─────────────────────────────────────────────────

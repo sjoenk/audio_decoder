@@ -35,13 +35,6 @@ struct PcmInfo {
     uint32_t bitsPerSample;
 };
 
-struct PcmResult {
-    std::vector<uint8_t> data;
-    uint32_t sampleRate;
-    uint32_t channels;
-    uint32_t bitsPerSample;
-};
-
 static PcmInfo DecodeToPcmStream(
         const std::string& inputPath,
         const std::function<void(const uint8_t*, size_t)>& onChunk,
@@ -168,21 +161,158 @@ static PcmInfo DecodeToPcmStream(
     return info;
 }
 
-static PcmResult DecodeToPcm(const std::string& inputPath,
-                              int64_t startMs = -1, int64_t endMs = -1,
-                              int targetSampleRate = -1, int targetChannels = -1,
-                              int targetBitDepth = -1) {
-    PcmResult result{};
-    auto info = DecodeToPcmStream(inputPath,
-        [&](const uint8_t* data, size_t size) {
-            result.data.insert(result.data.end(), data, data + size);
-        },
-        startMs, endMs, targetSampleRate, targetChannels, targetBitDepth);
-    result.sampleRate = info.sampleRate;
-    result.channels = info.channels;
-    result.bitsPerSample = info.bitsPerSample;
-    return result;
-}
+/// Accumulates RMS energy for a waveform while the audio is still decoding.
+///
+/// Keeping every decoded sample is not an option — three hours of 44.1 kHz
+/// stereo audio is close to a billion samples — so energy is folded into a
+/// fixed set of buckets instead.  Each bucket covers samplesPerBucket_
+/// consecutive samples; once the arrays are full, adjacent buckets are merged
+/// pairwise and the span per bucket doubles.  Memory therefore stays bounded
+/// regardless of duration, while short inputs (which never trigger a merge) are
+/// summarized sample-exact.
+///
+/// The window bounds in Build() are computed with 64-bit arithmetic on purpose:
+/// for longer files the product `i * totalSamples` easily exceeds a 32-bit
+/// integer, which would wrap to a negative offset.  The caller is expected to
+/// validate the normalization mode beforehand.
+class WaveformAccumulator {
+public:
+    explicit WaveformAccumulator(int numberOfSamples)
+            : numberOfSamples_(numberOfSamples) {
+        // Aim for kBucketsPerWindow buckets per output point so window bounds
+        // land close to a bucket edge, keeping the RMS error negligible once
+        // merging kicks in.
+        int64_t target = static_cast<int64_t>(numberOfSamples) * kBucketsPerWindow;
+        int64_t capacity = std::min(std::max(target, kMinBuckets), kMaxBuckets);
+        // An even capacity keeps pairwise merging exact.
+        if (capacity % 2 != 0) capacity++;
+        sumSquares_.resize(static_cast<size_t>(capacity), 0.0);
+        counts_.resize(static_cast<size_t>(capacity), 0);
+    }
+
+    /// Adds a chunk of interleaved little-endian 16-bit PCM.  A sample split
+    /// across two chunks is carried over instead of dropped.
+    void AddPcm(const uint8_t* data, size_t size) {
+        size_t offset = 0;
+        if (hasPendingByte_ && size > 0) {
+            Add(static_cast<int16_t>(static_cast<uint16_t>(pendingByte_) |
+                                     (static_cast<uint16_t>(data[0]) << 8)));
+            hasPendingByte_ = false;
+            offset = 1;
+        }
+        for (; offset + 1 < size; offset += 2) {
+            Add(static_cast<int16_t>(static_cast<uint16_t>(data[offset]) |
+                                     (static_cast<uint16_t>(data[offset + 1]) << 8)));
+        }
+        if (offset < size) {
+            pendingByte_ = data[offset];
+            hasPendingByte_ = true;
+        }
+    }
+
+    /// Builds the normalized waveform from everything accumulated so far.
+    std::vector<double> Build(const std::string& normalization) const {
+        if (totalSamples_ == 0) {
+            return std::vector<double>(static_cast<size_t>(numberOfSamples_), 0.0);
+        }
+
+        int64_t windowSize = std::max<int64_t>(1, totalSamples_ / numberOfSamples_);
+        std::vector<double> waveform;
+        double maxRms = 0;
+
+        for (int i = 0; i < numberOfSamples_; i++) {
+            int64_t start = static_cast<int64_t>(i) * totalSamples_ / numberOfSamples_;
+            if (start >= totalSamples_) break;
+            int64_t end = std::min(start + windowSize, totalSamples_);
+
+            double rms = std::sqrt(SumSquaresIn(start, end) /
+                                   static_cast<double>(end - start));
+            waveform.push_back(rms);
+            if (rms > maxRms) maxRms = rms;
+        }
+
+        // Samples are signed 16-bit PCM with range [-32768, 32767], so absolute
+        // mode divides by the max magnitude (32768) to keep the result inside
+        // [0.0, 1.0] even when a window is filled with -32768.
+        const bool useAbsolute = (normalization == "absolute");
+        std::vector<double> result;
+        result.reserve(static_cast<size_t>(numberOfSamples_));
+        for (double value : waveform) {
+            result.push_back(useAbsolute ? value / 32768.0
+                                         : ((maxRms > 0) ? value / maxRms : 0.0));
+        }
+        // Pad if the audio was shorter than the requested resolution.
+        result.resize(static_cast<size_t>(numberOfSamples_), 0.0);
+        return result;
+    }
+
+private:
+    static constexpr int64_t kBucketsPerWindow = 256;
+    static constexpr int64_t kMinBuckets = 1024;
+
+    /// Caps the accumulator at ~4 MB (one double plus one int64 per bucket).
+    static constexpr int64_t kMaxBuckets = 262144;
+
+    void Add(int16_t sample) {
+        if (bucketCount_ == 0 || counts_[bucketCount_ - 1] >= samplesPerBucket_) {
+            if (bucketCount_ == counts_.size()) MergeAdjacentBuckets();
+            bucketCount_++;
+            sumSquares_[bucketCount_ - 1] = 0.0;
+            counts_[bucketCount_ - 1] = 0;
+        }
+        double value = static_cast<double>(sample);
+        sumSquares_[bucketCount_ - 1] += value * value;
+        counts_[bucketCount_ - 1]++;
+        totalSamples_++;
+    }
+
+    /// Halves the resolution so more samples fit in the same arrays.
+    void MergeAdjacentBuckets() {
+        size_t dst = 0;
+        for (size_t src = 0; src < bucketCount_; src += 2) {
+            sumSquares_[dst] = sumSquares_[src] + sumSquares_[src + 1];
+            counts_[dst] = counts_[src] + counts_[src + 1];
+            dst++;
+        }
+        bucketCount_ = dst;
+        samplesPerBucket_ *= 2;
+    }
+
+    /// Sum of squares over the sample range [start, end).
+    double SumSquaresIn(int64_t start, int64_t end) const {
+        double sum = 0;
+        // Every bucket but the last is full, so bucket b starts at
+        // b * samplesPerBucket_.
+        size_t bucket = static_cast<size_t>(start / samplesPerBucket_);
+        for (; bucket < bucketCount_; bucket++) {
+            int64_t bucketStart = static_cast<int64_t>(bucket) * samplesPerBucket_;
+            if (bucketStart >= end) break;
+            int64_t bucketEnd = bucketStart + counts_[bucket];
+            int64_t overlap = std::min(end, bucketEnd) - std::max(start, bucketStart);
+            if (overlap <= 0) continue;
+            if (overlap >= counts_[bucket]) {
+                sum += sumSquares_[bucket];
+            } else {
+                // Partial overlap: assume the energy is spread evenly across
+                // the bucket.
+                sum += sumSquares_[bucket] * static_cast<double>(overlap) /
+                       static_cast<double>(counts_[bucket]);
+            }
+        }
+        return sum;
+    }
+
+    int numberOfSamples_;
+    std::vector<double> sumSquares_;
+    std::vector<int64_t> counts_;
+
+    /// Number of samples each full bucket covers; doubles on every merge.
+    int64_t samplesPerBucket_ = 1;
+    size_t bucketCount_ = 0;
+    int64_t totalSamples_ = 0;
+    uint8_t pendingByte_ = 0;
+    bool hasPendingByte_ = false;
+};
 
 static void WriteWavHeader(std::ostream& file, uint32_t dataSize,
                            uint32_t sampleRate, uint16_t channels,
@@ -531,64 +661,23 @@ static std::string TrimAudio(const std::string& inputPath,
 static FlValue* GetWaveform(const std::string& path, int numberOfSamples,
                             const std::string& normalization = "perFile") {
     // Fail fast on an invalid normalization mode before doing the expensive
-    // DecodeToPcm + RMS work below.
+    // decode + RMS work below.
     if (normalization != "perFile" && normalization != "absolute") {
         throw std::invalid_argument(
             "Unknown waveform normalization: " + normalization);
     }
 
-    auto pcm = DecodeToPcm(path);
+    // RMS energy is folded into the accumulator while decoding, so the whole
+    // track never has to be held in memory (#49).
+    WaveformAccumulator accumulator(numberOfSamples);
+    DecodeToPcmStream(path, [&](const uint8_t* data, size_t size) {
+        accumulator.AddPcm(data, size);
+    });
 
     FlValue* list = fl_value_new_list();
-
-    if (pcm.data.empty()) {
-        for (int i = 0; i < numberOfSamples; i++) {
-            fl_value_append_take(list, fl_value_new_float(0.0));
-        }
-        return list;
+    for (double value : accumulator.Build(normalization)) {
+        fl_value_append_take(list, fl_value_new_float(value));
     }
-
-    const int16_t* samples = reinterpret_cast<const int16_t*>(pcm.data.data());
-    size_t totalSamples = pcm.data.size() / 2;
-    size_t samplesPerWindow =
-        std::max(static_cast<size_t>(1), totalSamples / numberOfSamples);
-
-    std::vector<double> waveform;
-    double maxRms = 0;
-
-    for (int i = 0; i < numberOfSamples; i++) {
-        size_t start = static_cast<size_t>(i) * totalSamples / numberOfSamples;
-        size_t end = std::min(start + samplesPerWindow, totalSamples);
-        if (start >= totalSamples) break;
-
-        double sumSquares = 0;
-        for (size_t j = start; j < end; j++) {
-            double s = static_cast<double>(samples[j]);
-            sumSquares += s * s;
-        }
-        double rms = std::sqrt(sumSquares / (end - start));
-        waveform.push_back(rms);
-        if (rms > maxRms) maxRms = rms;
-    }
-
-    // Samples are signed 16-bit PCM with range [-32768, 32767], so absolute
-    // mode divides by the max magnitude (32768) to keep the result inside
-    // [0.0, 1.0] even when a window is filled with -32768.
-    const bool useAbsolute = (normalization == "absolute");
-    for (size_t i = 0; i < waveform.size(); i++) {
-        double scaled;
-        if (useAbsolute) {
-            scaled = waveform[i] / 32768.0;
-        } else {
-            scaled = (maxRms > 0) ? waveform[i] / maxRms : 0.0;
-        }
-        fl_value_append_take(list, fl_value_new_float(scaled));
-    }
-
-    while (fl_value_get_length(list) < static_cast<size_t>(numberOfSamples)) {
-        fl_value_append_take(list, fl_value_new_float(0.0));
-    }
-
     return list;
 }
 
