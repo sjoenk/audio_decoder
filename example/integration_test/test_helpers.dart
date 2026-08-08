@@ -82,6 +82,10 @@ Future<void> writePcmWavFile({
         );
       }
       sink.add(Uint8List.sublistView(block, 0, frames * bytesPerSample));
+      // Flush before refilling `block`: the view above shares its bytes, and
+      // `add` queues without backpressure, so a large input would otherwise
+      // both pile up in the sink's buffer and risk being rewritten in place.
+      await sink.flush();
       written += frames;
     }
   } finally {
