@@ -3,7 +3,7 @@
 * **Fix `OutOfMemoryError` on Android for long recordings** (#49) — `convertToM4a` collected the entire decoded track before encoding started, so a three hour file needed ~1.9 GB of PCM in memory and crashed on the Android heap limit. Decoding and AAC encoding now run interleaved, keeping peak memory independent of the audio duration.
   * `trimAudio` no longer buffers the trimmed range either (both the M4A and the WAV output path stream to disk), on Android and Windows.
   * `getWaveform` / `getWaveformBytes` fold RMS energy into a bounded set of buckets while decoding instead of collecting every sample — the old Android path stored boxed `Short` values (~16 bytes per sample) and ran out of memory well before an hour of audio. Implemented on Android, iOS, macOS, Linux and Windows.
-  * For files long enough to exceed the bucket resolution the waveform is now approximated: values stay within ~0.004 of the previous result for regular material, while an extremely short and loud transient can spread into one neighbouring window.
+  * For files long enough to exceed the bucket resolution the waveform is now approximated: values stay within ~0.001 of the previous result for regular material, while an extremely short and loud transient can spread into one neighbouring window.
 * Windows: `trimAudio` no longer decodes the input twice for WAV output.
 * Android: M4A timestamps are derived from the running frame count instead of accumulated per-buffer deltas, which drifted on long recordings; the encoder, muxer and extractor are now released on failure and a partially written output file is removed.
 
