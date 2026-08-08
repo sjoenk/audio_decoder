@@ -616,11 +616,19 @@ class AudioDecoderPlugin : FlutterPlugin, MethodCallHandler {
         private var released = false
 
         init {
-            if (timeRangeUs != null && timeRangeUs.first > 0) {
-                track.extractor.seekTo(timeRangeUs.first, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+            // A throwing initializer leaves the instance unconstructed, so
+            // neither close() nor use {} would ever run: release the codec here
+            // or its native resources leak.
+            try {
+                if (timeRangeUs != null && timeRangeUs.first > 0) {
+                    track.extractor.seekTo(timeRangeUs.first, MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                }
+                decoder.configure(track.format, null, null, 0)
+                decoder.start()
+            } catch (e: Exception) {
+                decoder.release()
+                throw e
             }
-            decoder.configure(track.format, null, null, 0)
-            decoder.start()
         }
 
         override fun next(): ByteArray? {
